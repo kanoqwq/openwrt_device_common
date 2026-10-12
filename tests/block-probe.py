@@ -34,16 +34,17 @@ class BlockProbe(unittest.TestCase):
             disk = Path(directory) / 'disk.ext4'
             with disk.open('wb') as stream:
                 stream.truncate(16 << 20)
-            subprocess.run(['mkfs.ext4', '-q', '-F', '-L', 'probe-fixture', str(disk)], check=True)
             command = r'''
 set -eu
 mkdir -p /var/lock /var/run
 apk update >/dev/null
-apk add --allow-untrusted /test/block.apk coreutils-timeout
+apk add --allow-untrusted /test/block.apk coreutils-timeout e2fsprogs
 test -x /sbin/block
 test -s /lib/libblkid-tiny.so
 test -s /etc/init.d/fstab
-cp /test/disk.ext4 /dev/sd-fixture
+cp /test/disk.ext4 /tmp/disk.ext4
+mkfs.ext4 -q -F -L probe-fixture /tmp/disk.ext4
+cp /tmp/disk.ext4 /dev/sd-fixture
 mkfifo /dev/sd-fifo
 ln -s /dev/sd-fifo /dev/sd-fifo-link
 ln -s /dev/zero /dev/sdiag
