@@ -1,0 +1,19 @@
+#!/bin/sh
+# Let the platform owner sequence its power state instead of MU300's SFUN dance.
+set -eu
+selected=${MU300_SIM_SLOT:-}
+if [ -n "$selected" ]; then
+    case "$selected" in 0|1) ;; *) exit 2 ;; esac
+    own=$(cat /sys/module/sipc_wwan/parameters/card)
+    if [ "$selected" != "$own" ]; then
+        # Only re-register the addressed standby radio; WAN and MM stay up.
+        /usr/libexec/unisoc-modem/at -t 15 'AT+CFUN=4' | grep -q '^OK'
+        /usr/libexec/unisoc-modem/at -t 15 'AT+CFUN=1' | grep -q '^OK'
+        exit 0
+    fi
+fi
+iface=$(uci -q get unisoc_modem.main.data_interface) || iface=wan
+ifdown "$iface"
+mmcli -m any --timeout=30 --disable
+mmcli -m any --timeout=30 --enable
+ifup "$iface"

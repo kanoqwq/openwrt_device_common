@@ -1,0 +1,151 @@
+#!/usr/bin/python3
+"""Asynchronous data-SIM selection through the system's existing e5-sim tool."""
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import time
+import uuid
+
+RUN = Path(os.environ.get('E5_DATA_SIM_RUN', '/run/unisoc-data-sim'))
+CARD = Path(os.environ.get('E5_DATA_SIM_CARD', '/sys/module/sipc_wwan/parameters/card'))
+SWITCH = os.environ.get('E5_DATA_SIM_TOOL', '/usr/sbin/e5-sim')
+
+
+def current():
+    value = CARD.read_text().strip()
+    if value not in ('0', '1'):
+        raise ValueError('Cannot read the current data SIM')
+    return value
+
+
+def saved():
+    return subprocess.check_output(['uci', '-q', 'get', 'e5-sim.main.card'],
+                                   timeout=3, text=True).strip()
+
+
+def get():
+    try:
+        card = int(current())
+    except (OSError, ValueError):
+        card = None
+    try:
+        boot = saved()
+    except (OSError, subprocess.SubprocessError):
+        boot = None
+    try:
+        wan = json.loads(subprocess.check_output(['ubus', '-t', '2', 'call', 'network.interface.wan', 'status'],
+                                                 timeout=3, text=True))
+        up = bool(wan.get('up'))
+    except (OSError, ValueError, subprocess.SubprocessError):
+        up = False
+    return dict(ok=True, data_sim=card, saved_sim=int(boot) if boot in ('0', '1') else None, data_up=up)
+
+
+def write(job):
+    path = RUN / (job['id'] + '.json')
+    tmp = path.with_suffix('.new')
+    tmp.write_text(json.dumps(job) + '\n')
+    tmp.replace(path)
+
+
+def status(job_id):
+    if not re.fullmatch('[a-f0-9]{32}', job_id):
+        raise ValueError('Invalid SIM switch job')
+    job = json.loads((RUN / (job_id + '.json')).read_text())
+    if job['state'] == 'running':
+        with (RUN / 'switch.lock').open('a') as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return job
+            # Re-read after acquiring: the worker may have completed between
+            # our first read and its lock release.
+            job = json.loads((RUN / (job_id + '.json')).read_text())
+            if job['state'] == 'running':
+                job.update(ok=False, state='error', error='SIM switch interrupted; check the current data SIM')
+    return job
+
+
+def worker(job_id):
+    job = json.loads((RUN / (job_id + '.json')).read_text())
+    try:
+        if current() != job['previous']:
+            raise ValueError('Data SIM changed; refresh before switching')
+        # e5-sim serializes with SMS transactions, persists the selection,
+        # restarts the existing modem interface and applies its automatic APN.
+        result = subprocess.run([SWITCH, job['target']], stdout=subprocess.DEVNULL,
+                                stderr=subprocess.PIPE, text=True, timeout=180)
+        if result.returncode:
+            raise RuntimeError(result.stderr.strip()[-300:] or 'System SIM switch failed')
+        if current() != job['target'] or saved() != job['target']:
+            raise RuntimeError('Data SIM did not match the saved selection; refresh actual state')
+        job.update(ok=True, state='done')
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+        job.update(ok=False, state='error', error=str(error))
+    write(job)
+
+
+def start(args):
+    if not isinstance(args, dict):
+        raise ValueError('Invalid SIM switch request')
+    target, previous = args.get('slot'), args.get('current')
+    if target not in ('0', '1') or previous not in ('0', '1'):
+        raise ValueError('Select a valid SIM slot')
+    if args.get('confirm') is not True:
+        raise ValueError('Confirm the data SIM switch')
+    RUN.mkdir(parents=True, exist_ok=True)
+    with (RUN / 'switch.lock').open('a') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ValueError('A data SIM switch is already running')
+        actual = current()
+        if previous != actual:
+            raise ValueError('Data SIM changed; refresh before switching')
+        if target == actual:
+            return dict(ok=True, state='done', target=target, unchanged=True)
+        # Bounded retention; only completed/stale jobs can exist while we own
+        # the lock. No settings, SMS or radio calibration are stored here.
+        for path in RUN.glob('*.json'):
+            if time.time() - path.stat().st_mtime > 3600:
+                path.unlink()
+        job = dict(ok=True, state='running', id=uuid.uuid4().hex, target=target,
+                   previous=previous, started=time.monotonic())
+        write(job)
+        try:
+            subprocess.Popen([sys.executable, str(Path(__file__).resolve()), 'worker', job['id']],
+                                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                       stderr=subprocess.DEVNULL, start_new_session=True,
+                                       pass_fds=(lock.fileno(),))
+        except OSError as error:
+            job.update(ok=False, state='error', error=str(error))
+            write(job)
+            raise
+        # The worker owns the inherited lock until it exits.
+        return dict(ok=True, state='running', id=job['id'], target=target)
+
+
+def main():
+    if len(sys.argv) == 3 and sys.argv[1] == 'worker':
+        worker(sys.argv[2])
+        return
+    try:
+        if sys.argv[1:] == ['get']:
+            result = get()
+        elif sys.argv[1:] == ['set']:
+            result = start(json.load(sys.stdin))
+        elif len(sys.argv) == 3 and sys.argv[1] == 'status':
+            result = status(sys.argv[2])
+        else:
+            raise ValueError('Invalid data SIM operation')
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+        result = dict(ok=False, state='error', error=str(error))
+    print(json.dumps(result))
+
+
+if __name__ == '__main__':
+    main()

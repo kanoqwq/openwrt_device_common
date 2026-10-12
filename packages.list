@@ -1,0 +1,17 @@
+# Shared OpenWrt runtime dependencies. openssl-util provides /usr/bin/openssl.
+wpad-basic-mbedtls
+wifi-scripts
+iwinfo
+iw
+ip-full
+bash
+mount-utils
+luci-proto-modemmanager
+dbus-utils
+alsa-utils
+curl
+ca-bundle
+openssl-util
+msmtp
+r8152-firmware
+python3
