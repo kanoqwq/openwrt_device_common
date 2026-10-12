@@ -39,6 +39,7 @@ def serve(handler, owner):
     pending = set()
     stopped = threading.Event()
     executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix='screen-get')
+    power = None
     with owner.condition:
         if owner.closed:
             executor.shutdown(wait=False)
@@ -90,11 +91,24 @@ def serve(handler, owner):
         return bytes(result)
 
     try:
+        try:
+            from e5_power_events import PowerEvents
+            power = PowerEvents()
+        except (OSError, AttributeError):
+            pass  # Non-Linux/test hosts: existing status polling still works.
         fragments = bytearray()
         fragmented = False
         while not owner.closed and not stopped.is_set():
             # No periodic wake when idle. The service's close() shuts the socket.
-            if not select.select([sock], [], [], None)[0]:
+            ready = select.select([sock, power.socket] if power else [sock], [], [], None)[0]
+            if power and power.socket in ready:
+                try:
+                    if power.receive():
+                        reply({'event': 'power-supply-change'})
+                except OSError:
+                    power.close()
+                    power = None  # Preserve RPC and the status-based fallback.
+            if sock not in ready:
                 continue
             first, second = read(2)
             final, opcode, length = bool(first & 128), first & 15, second & 127
@@ -148,6 +162,8 @@ def serve(handler, owner):
     except (OSError, EOFError, ValueError, AttributeError):
         pass
     finally:
+        if power:
+            power.close()
         stopped.set()
         with owner.condition:
             owner.rpc_sockets.discard(sock)

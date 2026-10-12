@@ -12,7 +12,7 @@ def stage_runtime(root):
     base = TOP / 'device/openwrt_device_common/overlay'
     names = ('usr/libexec/e5-voice-audio', 'usr/libexec/e5-hfp', 'usr/libexec/e5-volume',
              'usr/libexec/e5-call-volume', 'usr/lib/e5/e5_call_volume.py',
-             'usr/lib/e5/e5_call_events.py', 'usr/lib/e5/e5_screen_rpc.py', 'usr/lib/e5/e5_sounds.py',
+             'usr/lib/e5/e5_call_events.py', 'usr/lib/e5/e5_screen_rpc.py', 'usr/lib/e5/e5_power_events.py', 'usr/lib/e5/e5_sounds.py',
              'usr/libexec/e5-notification-sound', 'usr/libexec/e5-sms-notify',
              'etc/init.d/e5-hfp', 'etc/sysctl.d/10-e5-printk.conf')
     for name in names:
@@ -71,7 +71,7 @@ def stage_nv(root):
                               'start_service() {\n\trm -f /run/e5-vendor-prepared\n\t/opt/e5/t551m-nv-prepare || return 1')
     service = service.replace('instance cp_diskserver /opt/e5/android-run cp_diskserver',
         "instance cp_diskserver /bin/sh -c 'i=0; until [ -e /run/e5-vendor-prepared ]; do "
-        "i=$((i + 1)); [ $i -lt 12 ] || exit 1; sleep 1; done; exec /opt/e5/android-run cp_diskserver'")
+        "i=$((i + 1)); [ $i -lt 120 ] || exit 1; /opt/e5/bin/busybox sleep 0.1; done; exec /opt/e5/android-run cp_diskserver'")
     service += '\nstop_service() {\n\t/opt/e5/t551m-nv-stop quiesce\n}\n\nservice_stopped() {\n\t/opt/e5/t551m-nv-stop detach\n}\n'
     (root / 'etc/init.d/e5-vendor').write_text(service)
     (root / 'etc/init.d/e5-vendor').chmod(0o755)
