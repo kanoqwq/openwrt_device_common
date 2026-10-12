@@ -34,6 +34,12 @@ fi
 
 [ "$(uci -q get network.wan.apn_auto)" = 1 ] || exit 0
 
+# The shared dashboard resolves the active SIM on every netifd dial. Do not
+# overwrite its per-card choice or restart WAN from the legacy background job.
+if [ -x /usr/libexec/unisoc-modem/apn ]; then
+	exit 0
+fi
+
 # the SIM comes a while after ModemManager (the CP boots first)
 code= i=0
 while [ $i -lt 180 ]; do

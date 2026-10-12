@@ -43,6 +43,12 @@
     "action": { "type": "view", "path": "mu300/sim" },
     "depends": { "acl": [ "luci-app-mu300" ] }
   },
+  "admin/modem/apn": {
+    "title": "接入点 APN",
+    "order": 8,
+    "action": { "type": "view", "path": "mu300/apn" },
+    "depends": { "acl": [ "luci-app-mu300" ] }
+  },
   "admin/modem/sms": {
     "title": "短信",
     "order": 2,

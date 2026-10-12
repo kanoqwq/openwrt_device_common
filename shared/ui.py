@@ -68,6 +68,8 @@ def stage(root, profile='t551m'):
             target.write_bytes(source_bytes(src) if srcdir != 'lmo' else src.read_bytes())
             executable = srcdir == 'root' and any(part in src.parts for part in ('init.d', 'hotplug.d', 'libexec'))
             target.chmod(0o755 if executable else 0o644)
+            if srcdir == 'root' and src.relative_to(plugin / srcdir).as_posix() == 'etc/config/unisoc_apn':
+                target.chmod(0o600)
     # Fresh archive roots only receive the modem config in the loop above.
     # Apply the profile defaults there too, not only to existing installations.
     runpy.run_path(str(Path(__file__).with_name('network-startup.py')))['patch_root'](root, profile)
@@ -156,6 +158,8 @@ if __name__ == '__main__':
                     elif path.is_file():
                         info = archive.gettarinfo(str(path), str(path.relative_to(root)))
                         info.mode = 0o755 if any(p in path.parts for p in ('init.d', 'hotplug.d', 'libexec', 'uci-defaults')) or path.name in ('t551m-at', 't551m-atd', 'e5-at', 'e5-data-priority', 't551m-ui-compat', 't551m-network-startup') else 0o644
+                        if path.relative_to(root).as_posix() == 'etc/config/unisoc_apn':
+                            info.mode = 0o600
                         info.uid = info.gid = 0
                         info.uname = info.gname = 'root'
                         with path.open('rb') as stream:

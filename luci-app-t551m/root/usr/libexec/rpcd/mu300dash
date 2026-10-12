@@ -303,6 +303,8 @@ do_list() {
 	"traffic_get": { "slot": "String" },
 	"traffic_set": { "payload": "String", "slot": "String" },
 	"traffic_clear": { "slot": "String", "confirm": false },
+	"apn_get": { },
+	"apn_set": { "action": "String", "payload": "String" },
 	"usb_get": { },
 	"usb_set": { "kind": "String", "value": "String", "scope": "String", "auto": "String" },
 	"usb_net_list": { },
@@ -331,6 +333,12 @@ list)
 call)
     case ${2:-} in
         sysinfo)    run_m sysinfo    'm_sysinfo' ;;
+        apn_get)    "$DASH/apn" get ;;
+        apn_set)
+            action=$(inp '@.action'); payload=$(inp '@.payload')
+            case "$action" in save|delete|apply|auto) ;; *) printf '{"ok":0,"error":"apn_invalid"}\n'; exit 0 ;; esac
+            # Never log APN payloads or pass secrets through eval/argv.
+            printf '%s' "$payload" | "$DASH/apn" "$action" ;;
         sim_get)    "$DASH/data-sim" get ;;
         sim_set)    printf '%s' "$INPUT" | "$DASH/data-sim" set ;;
         sim_status) "$DASH/data-sim" status "$(inp '@.id')" ;;

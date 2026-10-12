@@ -115,7 +115,7 @@ try:
             catch(e){return e.name;}
         }''') == 'AbortError'
         page.wait_for_timeout(900)
-        assert len(reads) == before + 1, 'aborted GET was replayed'
+        assert len(reads) == before + 1, f'aborted GET was replayed: {reads[before:]}'
         started = time.monotonic()
         events.close()
         assert time.monotonic() - started < 1

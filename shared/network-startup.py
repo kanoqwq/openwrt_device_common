@@ -91,6 +91,30 @@ modemmanager_connect_retry() {
 '''
 
 
+APN_SELECTION = '''\t# unisoc-apn-selection: shared by E5, T551M and M8 on every dial.
+\tif [ "$device" = unisoc-sipc ] && [ -x /usr/libexec/unisoc-modem/apn ]; then
+\t\tlocal apn_selection apn_family apn_auth apn_source
+\t\tapn_selection=$(/usr/libexec/unisoc-modem/apn resolve "$device")
+\t\tif [ "$(printf '%s' "$apn_selection" | jsonfilter -e '@.ok')" != 1 ]; then
+\t\t\tproto_notify_error "$interface" APN_PROFILE_INVALID
+\t\t\treturn 1
+\t\tfi
+\t\tapn_source=$(printf '%s' "$apn_selection" | jsonfilter -e '@.source')
+\t\tif [ "$interface" = "$(printf '%s' "$apn_selection" | jsonfilter -e '@.iface')" ] && [ "$apn_source" != network ]; then
+\t\t\tapn=$(printf '%s' "$apn_selection" | jsonfilter -e '@.settings.apn')
+\t\t\tusername=$(printf '%s' "$apn_selection" | jsonfilter -e '@.settings.username')
+\t\t\tpassword=$(printf '%s' "$apn_selection" | jsonfilter -e '@.settings.password')
+\t\t\tapn_family=$(printf '%s' "$apn_selection" | jsonfilter -e '@.settings.pdptype')
+\t\t\tcase "$apn_family" in IP) iptype=ipv4 ;; IPV4V6) iptype=ipv4v6 ;; *) return 1 ;; esac
+\t\t\tapn_auth=$(printf '%s' "$apn_selection" | jsonfilter -e '@.settings.auth')
+\t\t\tcase "$apn_auth" in papchap) allowedauth='pap chap' ;; none|pap|chap) allowedauth=$apn_auth ;; *) return 1 ;; esac
+\t\t\tinit_epsbearer=keep
+\t\tfi
+\t\tunset apn_selection
+\tfi
+'''
+
+
 def patch_root(root, profile='t551m'):
     discovery = root / 'usr/libexec/e5-mm-report-ports'
     discovery.parent.mkdir(parents=True, exist_ok=True)
@@ -166,6 +190,12 @@ def patch_root(root, profile='t551m'):
     proto = root / 'lib/netifd/proto/modemmanager.sh'
     if proto.exists():
         text = proto.read_text()
+        if '# unisoc-apn-selection:' not in text:
+            anchor = '\t# set initial eps bearer settings\n'
+            if text.count(anchor) != 1:
+                raise ValueError('Unexpected ModemManager APN hook location')
+            text = text.replace(anchor, APN_SELECTION + anchor)
+            proto.write_text(text)
         if 'preserve AT-selected network mode' not in text:
             old = '\tif [ -z "${allowedmode}" ]; then\n\t\tmodemmanager_set_allowed_mode "$device" "$interface" "any"'
             if text.count(old) != 1:

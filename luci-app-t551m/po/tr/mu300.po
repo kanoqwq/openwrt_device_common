@@ -6,6 +6,9 @@ msgstr ""
 msgid "状态看板"
 msgstr "Durum paneli"
 
+msgid "接入点 APN"
+msgstr "Erişim noktaları (APN)"
+
 msgid "蜂窝"
 msgstr "Hücresel"
 

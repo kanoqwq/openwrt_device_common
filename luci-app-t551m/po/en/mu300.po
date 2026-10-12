@@ -37,3 +37,6 @@ msgid "CPU 设置"
 msgstr "CPU settings"
 msgid "铃声与通知"
 msgstr "Ringtones & notifications"
+
+msgid "接入点 APN"
+msgstr "Access points (APN)"
