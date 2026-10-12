@@ -149,9 +149,11 @@ print('Native GVariant decode, all call states, source SIM and modem rediscovery
 import tempfile
 from types import SimpleNamespace
 with tempfile.TemporaryDirectory() as tmp:
-    root=Path(tmp);config=root/'config';delta=root/'delta'
+    root=Path(tmp);config=root/'config';delta=root/'delta';manifest=root/'manifest.json'
+    manifest.write_text('{}')
     config.write_text('saved')
-    with patch.object(voice,'Path',side_effect=lambda p:delta if '/tmp/.uci/' in p else config), \
+    with patch.object(voice,'PHONE_MANIFEST',manifest), \
+         patch.object(voice,'Path',side_effect=lambda p:delta if '/tmp/.uci/' in p else config), \
          patch.object(voice.subprocess,'run',return_value=SimpleNamespace(returncode=0,stdout="phone.main.ring_sound='1'")) as uci:
         voice._alert_signature=voice._alert_values=None
         for _ in range(100):assert voice.alert_settings()['sound']
@@ -162,8 +164,27 @@ with tempfile.TemporaryDirectory() as tmp:
         delta.unlink();uci.return_value.stdout="phone.main.ring_sound='1'"
         assert voice.alert_settings()['sound'] and uci.call_count==3
         config.unlink();uci.return_value.returncode=1;uci.return_value.stdout=''
-        assert voice.alert_settings()=={'sound':True,'vibrate':True,'tone':'call','screen':True}
+        assert voice.alert_settings()=={'installed':True,'sound':True,'vibrate':True,'tone':'call','screen':True}
         voice.alert_settings();assert uci.call_count==4
+        # Cached enabled settings must not survive uninstall. Stop running
+        # processes while the modem still reports the same incoming call.
+        spawned.clear();now[0]=10
+        incoming=[{'id':'removed','state':'ringing-in'}]
+        with patch.object(voice.os,'killpg') as kill:
+            ringer.update(incoming,voice.alert_settings(),False)
+            assert len(spawned)==2
+            manifest.unlink()
+            disabled=voice.alert_settings()
+            assert not any(disabled[k] for k in ('installed','sound','vibrate','screen'))
+            assert uci.call_count==4
+            ringer.update(incoming,disabled,False)
+            assert kill.call_count==2 and not ringer.call_ids
+            now[0]=20;ringer.update(incoming,voice.alert_settings(),False)
+            assert len(spawned)==2
+            manifest.write_text('{}')
+            ringer.update(incoming,voice.alert_settings(),False)
+            assert len(spawned)==4 and uci.call_count==4
+            ringer.stop()
 print('Ringtone config cache, staged changes and deleted-config defaults passed')
 
 # Atomic screen requests wake immediately; unrelated status writes must not

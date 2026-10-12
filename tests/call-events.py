@@ -5,7 +5,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'overlay/usr/lib/e5'))
 from e5_call_events import CallEvents, ORIGIN
 
 events=CallEvents(port=0)
-state={'available':True,'calls':[],'updated':1,'bluetooth':{'updated':1,'connected':False}}
+state={'available':True,'phone_installed':True,'calls':[],'updated':1,'bluetooth':{'updated':1,'connected':False}}
 events.publish(state)
 def connect(origin=ORIGIN):
     client=http.client.HTTPConnection('127.0.0.1',events.port,timeout=2)
@@ -26,6 +26,13 @@ try:
     started=time.monotonic();events.publish({**state,'calls':[call]},wake=False)
     message=read_event();assert message['calls']==[call] and message['wake'] is False
     assert time.monotonic()-started<1,'notification delayed by polling'
+    # Removal during ringing clears the UI, including when the observer fails.
+    events.publish({'phone_installed':False,'calls':[call],'error':'fixture failure'})
+    message=read_event()
+    assert message['phone_installed'] is False and message['calls']==[]
+    assert message['wake'] is False and message['error'] is None
+    events.publish({**state,'calls':[call]})
+    assert read_event()['calls']==[call], 'reinstall did not restore events'
     events.publish({**state,'calls':[]});assert read_event()['calls']==[]
     client.close()
     # A fresh connection receives current state, not history.

@@ -107,8 +107,11 @@ class CallEvents:
                 self.server._handle_request_noblock()
 
     def publish(self, state, wake=True):
-        value = {'calls': state.get('calls', []), 'audio': state, 'wake': bool(wake),
-                 'error': None if state.get('available') and 'calls' in state
+        installed = bool(state.get('phone_installed', False))
+        value = {'phone_installed': installed,
+                 'calls': state.get('calls', []) if installed else [],
+                 'audio': state, 'wake': bool(wake) and installed,
+                 'error': None if not installed or (state.get('available') and 'calls' in state)
                  else state.get('error') or 'Call observer unavailable'}
         payload = json.dumps(stable(value), separators=(',', ':'), ensure_ascii=True).encode()
         if len(payload) > 65536:

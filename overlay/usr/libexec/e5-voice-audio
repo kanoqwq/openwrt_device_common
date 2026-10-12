@@ -22,6 +22,7 @@ import threading
 import time
 
 RUN = Path('/run/e5-voice-audio')
+PHONE_MANIFEST = Path('/usr/share/e5-infoscreen/www/plugins/phone/manifest.json')
 LIVE = {'dialing', 'ringing-out', 'active', 'held'}
 CALL_PATH = '/org/freedesktop/ModemManager1/Call/'
 
@@ -508,6 +509,11 @@ _alert_signature, _alert_values = None, None
 
 def alert_settings():
     global _alert_signature, _alert_values
+    # The linked web root is the plugin manager's installed-app inventory.
+    # Keep observing/routing calls after removal, but stop plugin-owned alerts.
+    if not PHONE_MANIFEST.is_file():
+        return {'installed': False, 'sound': False, 'screen': False,
+                'vibrate': False, 'tone': 'call'}
     signature = []
     for path in [Path('/etc/config/e5-plugin-phone'), Path('/tmp/.uci/e5-plugin-phone')]:
         try:
@@ -523,7 +529,7 @@ def alert_settings():
         if '=' in line:
             key, value = line.split('=', 1)
             values[key.rsplit('.', 1)[-1]] = value.strip("'")
-    result = {'sound': values.get('ring_sound', '1') == '1',
+    result = {'installed': True, 'sound': values.get('ring_sound', '1') == '1',
             'screen': values.get('ring_screen', '1') != '0',
             'vibrate': values.get('ring_vibrate', '1') == '1',
             'tone': values.get('ring_tone') if values.get('ring_tone') in ('beep', 'custom') else 'call'}
@@ -554,6 +560,9 @@ class RingAlert:
         self.call_ids = set()
 
     def update(self, observed, settings, voice_active):
+        if settings.get('installed') is False:
+            self.stop()
+            return
         ids = {c['id'] for c in observed if c['state'] in {'ringing-in', 'waiting'}}
         if not ids:
             self.stop()
@@ -659,14 +668,16 @@ def main():
                 state = controller.update(observed, settings)
                 if was_active and not controller.active:
                     write_json(RUN / 'settings.json', last_settings)
-                snapshot = {**state, 'updated': time.time(), 'calls': observed}
+                snapshot = {**state, 'updated': time.time(), 'calls': observed,
+                            'phone_installed': alerts['installed']}
                 write_json(RUN / 'status.json', snapshot)
                 if events: events.publish(snapshot, alerts['screen'])
             except Exception as error:
                 # A temporary D-Bus query failure must not tear down an active
                 # audio route, and there is never a timer that hangs up calls.
                 logging.error('state read: %s', error)
-                snapshot = {**controller.status(), 'error': str(error), 'updated': time.time()}
+                snapshot = {**controller.status(), 'error': str(error), 'updated': time.time(),
+                            'phone_installed': PHONE_MANIFEST.is_file()}
                 write_json(RUN / 'status.json', snapshot)
                 if events: events.publish(snapshot)
             changed.wait(.5)
