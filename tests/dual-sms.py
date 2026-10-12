@@ -148,11 +148,12 @@ class Inbox(unittest.TestCase):
                 self.assertEqual(restored['messages'][0]['id'],data['messages'][0]['id'])
                 self.assertTrue((root/'run/unread').read_text().endswith(str(data['messages'][0]['id'])+'\n'))
 
-    def test_multipart_keeps_id_and_forwards_only_when_complete(self):
+    def test_multipart_allocates_id_and_alerts_only_when_complete(self):
         data=self.fresh();receiver.ingest(data,1,'card2',[],1)
         two=incoming('尾部',2,8,2);one=incoming('头部',1,8,1)
         alerts,forwards=receiver.ingest(data,1,'card2',sms_pdu.assemble([two]),2)
-        identifier=data['messages'][0]['id'];self.assertEqual(forwards,[])
+        self.assertEqual(data['messages'],[]);self.assertEqual((alerts,forwards),([],[]))
+        identifier=data['next_id']
         alerts,forwards=receiver.ingest(data,1,'card2',sms_pdu.assemble([two,one]),3)
         self.assertEqual(data['messages'][0]['id'],identifier)
         self.assertEqual(forwards,[identifier]);self.assertEqual(data['messages'][0]['text'],'头部尾部')

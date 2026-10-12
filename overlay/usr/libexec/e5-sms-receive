@@ -21,7 +21,7 @@ import sys
 import time
 
 sys.path.insert(0, os.environ.get('E5_SMS_LIB', str(Path(__file__).resolve().parents[1] / 'lib/e5')))
-from sms_pdu import listing, assemble
+from sms_pdu import listing, assemble, decode
 
 DATA = Path(os.environ.get('E5_SMS_DATA', '/etc/e5-sms'))
 RUN = Path(os.environ.get('E5_SMS_RUN', '/tmp/run/e5-sms'))
@@ -98,38 +98,80 @@ def save(data):
     DATA.mkdir(parents=True, exist_ok=True); DATA.chmod(0o700)
     atomic(INBOX, data)
     unread = ''.join(f'/org/freedesktop/ModemManager1/SMS/{m["id"]}\n'
-                     for m in data['messages'] if m.get('unread') and not m.get('deleted'))
+                     for m in data['messages'] if m.get('unread') and not m.get('deleted') and m.get('state') == 'received')
     temp = RUN / ('unread.' + str(os.getpid()))
     temp.write_text(unread); temp.chmod(0o600); temp.replace(RUN / 'unread')
 
 
 def ingest(data, card, identity, messages, now):
-    """Stable IDs, per-SIM baselines, multipart updates and durable deduplication."""
+    """Publish complete messages only; retain raw missing parts across scans."""
     scope = f'{card}:{identity}'
     baseline = scope not in data['initialized']
+    pending = data.setdefault('pending', {})
+    fragments = {p['fingerprint']: p for p in pending.get(scope, [])}
     alerts, forwards = [], []
+    own = [m for m in data['messages'] if m['card'] == card and m['identity'] == identity]
+
+    def remember(part, historical, first_seen):
+        raw = part.get('pdu')
+        if not raw:
+            return  # Legacy partials without a raw PDU cannot be guessed.
+        decoded = decode(raw)
+        if decoded is None or decoded['fingerprint'] != part['fingerprint']:
+            raise ValueError('SMS fragment fingerprint mismatch')
+        previous = fragments.get(decoded['fingerprint'], {})
+        fragments[decoded['fingerprint']] = {
+            **decoded, 'storage_index': part['index'],
+            'historical': previous.get('historical', historical),
+            'first_seen': previous.get('first_seen', first_seen)}
+
+    # Migrate old incomplete records without changing already complete history.
+    # Their raw PDUs remain recoverable, but partial text no longer reaches UI.
+    for old in own:
+        if old.get('state') == 'receiving' and not old.get('deleted'):
+            for part in old['parts']:
+                remember(part, old.get('historical', True), old.get('first_seen', now))
+    complete = [m for m in own if m.get('state') == 'received' or m.get('deleted')]
+    known = {p['fingerprint']: m for m in complete for p in m['parts']}
+    for fingerprint in known:
+        fragments.pop(fingerprint, None)
     for message in messages:
-        fingerprints = {p['fingerprint'] for p in message['parts']}
-        old = next((m for m in data['messages'] if m['card'] == card and m['identity'] == identity
-                    and fingerprints.intersection(p['fingerprint'] for p in m['parts'])), None)
-        if old and old.get('deleted'):
+        for part in message['parts']:
+            old = known.get(part['fingerprint'])
+            if old is not None:
+                fragments.pop(part['fingerprint'], None)
+                # SIM indices may change. Keep the durable body and all other
+                # parts when a scan only sees a subset after SIM archival.
+                for saved in old['parts']:
+                    if saved['fingerprint'] == part['fingerprint']:
+                        saved['index'] = part['index']
+                continue
+            remember(part, baseline, now)
+
+    remaining = set(fragments)
+    for message in assemble(list(fragments.values())):
+        if message['state'] != 'received':
             continue
-        if old is None:
-            old = {'id': data['next_id'], 'card': card, 'sim': f'SIM{card + 1}',
-                   'identity': identity, 'unread': not baseline, 'historical': baseline,
-                   'first_seen': now, 'forward_attempted': baseline}
-            data['next_id'] += 1; data['messages'].append(old)
-            if not baseline:
-                alerts.append(old['id'])
-        # An interrupted archive may leave only some multipart fragments on
-        # the SIM. Never replace the durable complete message with that subset.
-        if not (old.get('state') == 'received' and message['state'] != 'received'
-                and fingerprints <= {p['fingerprint'] for p in old['parts']}):
-            old.update(message)
-        old['direction'] = 'in'
-        if old['state'] == 'received' and not old.get('forward_attempted'):
-            old['forward_attempted'] = True
-            forwards.append(old['id'])
+        fingerprints = {p['fingerprint'] for p in message['parts']}
+        historical = any(fragments[f]['historical'] for f in fingerprints)
+        old = {'id': data['next_id'], 'card': card, 'sim': f'SIM{card + 1}',
+               'identity': identity, 'unread': not historical, 'historical': historical,
+               'first_seen': min(fragments[f]['first_seen'] for f in fingerprints),
+               'forward_attempted': True, 'direction': 'in', **message}
+        data['next_id'] += 1
+        data['messages'].append(old)
+        remaining.difference_update(fingerprints)
+        if not historical:
+            alerts.append(old['id']); forwards.append(old['id'])
+    # The same atomic inbox write commits pending fragments and complete
+    # messages. There is no interval in which a completed group loses dedupe.
+    if remaining:
+        pending[scope] = [fragments[f] for f in sorted(remaining)]
+    else:
+        pending.pop(scope, None)
+    data['messages'] = [m for m in data['messages'] if not (
+        m['card'] == card and m['identity'] == identity and m.get('state') == 'receiving' and
+        all(p.get('pdu') for p in m['parts']) and not m.get('deleted'))]
     if baseline:
         data['initialized'].append(scope)
     data['slots'][str(card)] = {'identity': identity, 'ok': True, 'updated': now, 'error': None}
@@ -256,7 +298,8 @@ def public(message):
 def inbox():
     with locked():
         data = load()
-        messages = [public(m) for m in data['messages'] if not m.get('deleted')]
+        messages = [public(m) for m in data['messages'] if not m.get('deleted') and
+                    (m.get('direction') == 'out' or m.get('state') == 'received')]
         return {'messages': sorted(messages, key=lambda m: (m['time'], m['id']), reverse=True),
                 'updated': data.get('updated'), 'slots': data['slots'], 'dual_sim': True}
 

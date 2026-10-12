@@ -33,6 +33,9 @@ def decode(pdu):
     if not data:
         raise ValueError('empty SMS PDU')
     pos = 1 + data[0]
+    if pos > len(data):
+        raise ValueError('truncated SMSC address')
+    smsc = data[:pos].hex()
 
     def take(size):
         nonlocal pos
@@ -69,7 +72,7 @@ def decode(pdu):
     else:
         raise ValueError('unsupported SMS alphabet')
     user = take(math.ceil(udl * 7 / 8) if alphabet == 0 else udl)
-    header_bytes, concat = 0, None
+    header_bytes, concat, extra_header = 0, None, []
     if flags & 0x40:
         if not user:
             raise ValueError('missing SMS header')
@@ -84,12 +87,15 @@ def decode(pdu):
             item = user[at:at + length]; at += length
             if at > header_bytes:
                 raise ValueError('invalid SMS header length')
-            if tag == 0 and length == 3:
-                concat = {'ref': item[0], 'total': item[1], 'part': item[2]}
-            elif tag == 8 and length == 4:
-                concat = {'ref': int.from_bytes(item[:2], 'big'), 'total': item[2], 'part': item[3]}
-            elif tag in (0x24, 0x25) and any(item):
-                raise ValueError('SMS national language shift table unsupported')
+            if tag in (0, 8):
+                if concat or length != (3 if tag == 0 else 4):
+                    raise ValueError('invalid concatenated SMS header')
+                concat = {'ref': item[0] if tag == 0 else int.from_bytes(item[:2], 'big'),
+                          'width': 8 if tag == 0 else 16, 'total': item[-2], 'part': item[-1]}
+            else:
+                extra_header.append((tag, item.hex()))
+                if tag in (0x24, 0x25) and any(item):
+                    raise ValueError('SMS national language shift table unsupported')
         if concat and not 1 <= concat['part'] <= concat['total'] <= 255:
             raise ValueError('invalid concatenated SMS numbering')
     if alphabet == 0:
@@ -102,7 +108,8 @@ def decode(pdu):
     else:
         raise ValueError('reserved SMS alphabet')
     return {'number': number, 'text': text, 'time': dt.isoformat(timespec='seconds'),
-            'epoch': int(dt.timestamp()), 'concat': concat, 'dcs': dcs,
+            'epoch': int(dt.timestamp()), 'concat': concat, 'dcs': dcs, 'pid': pid,
+            'smsc': smsc, 'udh': sorted(extra_header),
             'fingerprint': hashlib.sha256(data).hexdigest(), 'pdu': data.hex()}
 
 
@@ -128,24 +135,47 @@ def listing(response):
 
 def assemble(parts):
     groups = []
+    ambiguous = set()
+    def key(part):
+        c = part['concat']
+        return (part['number'], part['dcs'], part.get('pid'), part.get('smsc'),
+                repr(part.get('udh', [])), c.get('width'), c['ref'], c['total'])
     for part in sorted(parts, key=lambda p: (p['epoch'], p['storage_index'])):
         c = part['concat']
         group = None
         if c:
-            for old in reversed(groups):
+            candidates = []
+            for old in groups:
                 ref = old[0]['concat']
-                if (ref and old[0]['number'] == part['number'] and old[0]['dcs'] == part['dcs']
-                        and ref['ref'] == c['ref'] and ref['total'] == c['total']
-                        and abs(old[0]['epoch'] - part['epoch']) < 600
-                        and all(p['concat']['part'] != c['part'] for p in old)):
-                    group = old; break
+                if ref and key(old[0]) == key(part) and all(abs(p['epoch'] - part['epoch']) <= 600 for p in old):
+                    duplicate = next((p for p in old if p['fingerprint'] == part['fingerprint']), None)
+                    if duplicate:
+                        duplicate.update(part)
+                        group = old
+                        break
+                    if all(p['concat']['part'] != c['part'] for p in old):
+                        candidates.append(old)
+            if group is not None:
+                continue
+            if len(candidates) == 1 and id(candidates[0]) not in ambiguous:
+                group = candidates[0]
+            elif candidates:
+                # A reused reference with two possible messages is not enough
+                # information to choose a tail. Keep all fragments unpublished.
+                ambiguous.update(id(old) for old in candidates)
+                group = []; groups.append(group); ambiguous.add(id(group))
+        else:
+            duplicate = next((p for old in groups for p in old if p['fingerprint'] == part['fingerprint']), None)
+            if duplicate:
+                duplicate.update(part)
+                continue
         if group is None:
             group = []; groups.append(group)
         group.append(part)
     result = []
     for group in groups:
         c = group[0]['concat']; ordered = sorted(group, key=lambda p: p['concat']['part'] if c else 1)
-        complete = not c or len(ordered) == c['total']
+        complete = id(group) not in ambiguous and (not c or len(ordered) == c['total'])
         first = min(group, key=lambda p: p['epoch'])
         result.append({'number': first['number'], 'time': first['time'], 'epoch': first['epoch'],
                        'text': ''.join(p['text'] for p in ordered), 'state': 'received' if complete else 'receiving',
