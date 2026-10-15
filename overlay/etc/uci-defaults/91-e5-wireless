@@ -25,7 +25,6 @@ set wireless.default_radio0.device='radio0'
 set wireless.default_radio0.mode='ap'
 set wireless.default_radio0.network='lan'
 set wireless.default_radio0.ifname='wlan0'
-set wireless.default_radio0.ieee80211w='0'
 set wireless.default_radio0.wps_pushbutton='0'
 UCI
 uci set wireless.default_radio0.ssid="$E5_WIFI_SSID"

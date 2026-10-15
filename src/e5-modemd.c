@@ -26,8 +26,69 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+#ifndef SOCKET_NAME
 #define SOCKET_NAME "modemd"
+#endif
 #define DUMP_COMPLETE "SLOGMODEM DUMP COMPLETE"
+
+/* Notifications are stream data: read boundaries are not message boundaries.
+ * Match state tokens incrementally, accepting vendor messages with or without
+ * a trailing NUL. Keep only a bounded suffix, never an entire CP dump/reason.
+ */
+struct state_reader {
+	char tail[64];
+	size_t used;
+};
+
+static int send_all(int fd, const char *message, size_t size)
+{
+	while (size) {
+		ssize_t n = send(fd, message, size, MSG_NOSIGNAL);
+		if (n < 0 && errno == EINTR)
+			continue;
+		if (n <= 0)
+			return -1;
+		message += n;
+		size -= n;
+	}
+	return 0;
+}
+
+static int read_states(struct state_reader *reader, int fd,
+		       const char *data, size_t size)
+{
+	static const struct { const char *name; int dump; } events[] = {
+		{"Modem Assert", 1}, {"Modem State: Assert", 1},
+		{"Modem Blocked", 1}, {"Modem State: Blocked", 1},
+		{"Modem Reset", 0}, {"Modem Alive", 0},
+		{"Modem State: Reset", 0}, {"Modem State: Alive", 0}
+	};
+	for (size_t i = 0; i < size; i++) {
+		if (!data[i]) {
+			reader->used = 0;
+			continue;
+		}
+		if (reader->used == sizeof(reader->tail)) {
+			memmove(reader->tail, reader->tail + 1, --reader->used);
+		}
+		reader->tail[reader->used++] = data[i];
+		for (size_t e = 0; e < sizeof(events) / sizeof(events[0]); e++) {
+			size_t len = strlen(events[e].name);
+			if (reader->used < len ||
+			    memcmp(reader->tail + reader->used - len, events[e].name, len))
+				continue;
+			printf("e5-modemd: %s\n", events[e].name);
+			if (events[e].dump) {
+				if (send_all(fd, DUMP_COMPLETE, sizeof(DUMP_COMPLETE)) < 0) {
+					fprintf(stderr, "e5-modemd: dump acknowledgement: %s\n", strerror(errno));
+					return -1;
+				}
+				printf("e5-modemd: sent \"%s\" (CP dump skipped)\n", DUMP_COMPLETE);
+			}
+		}
+	}
+	return 0;
+}
 
 static int connect_modemd(void)
 {
@@ -56,16 +117,19 @@ int main(int argc, char **argv)
 {
 	char buf[1024];
 	int fd, n, waited = 0;
+	struct state_reader reader = {0};
 
 	setvbuf(stdout, NULL, _IOLBF, 0);
 	if (argc > 1) {
-		if (strcmp(argv[1], "blocked")) {
+		if (argc != 2 || strcmp(argv[1], "blocked")) {
 			fprintf(stderr, "usage: e5-modemd [blocked]\n");
 			return 2;
 		}
 		fd = connect_modemd();
-		if (fd < 0 || write(fd, MODEM_BLOCKED, sizeof(MODEM_BLOCKED)) < 0) {
+		if (fd < 0 || send_all(fd, MODEM_BLOCKED, sizeof(MODEM_BLOCKED)) < 0) {
 			fprintf(stderr, "e5-modemd: modemd: %s\n", strerror(errno));
+			if (fd >= 0)
+				close(fd);
 			return 1;
 		}
 		printf("e5-modemd: sent \"%s\"\n", MODEM_BLOCKED);
@@ -80,28 +144,13 @@ int main(int argc, char **argv)
 	printf("e5-modemd: connected to modemd\n");
 
 	for (;;) {
-		n = read(fd, buf, sizeof(buf) - 1);
+		n = read(fd, buf, sizeof(buf));
 		if (n < 0 && errno == EINTR)
 			continue;
 		if (n <= 0)
 			break;
-		buf[n] = '\0';
-		/* one read may hold several NUL-terminated messages */
-		for (char *m = buf; m < buf + n; m += strlen(m) + 1) {
-			if (!*m)
-				continue;
-			printf("e5-modemd: %s\n", m);
-			/* "Modem Assert: <reason>" as it happens, "Modem State: Assert" to
-			 * a client that connects during one; "Modem Blocked" too, which
-			 * modem_control resets after the same dump ("block, later reset") */
-			if (strstr(m, "Assert") || strstr(m, MODEM_BLOCKED)) {
-				/* the RIL writes its messages with the NUL, as sizeof() */
-				if (write(fd, DUMP_COMPLETE, sizeof(DUMP_COMPLETE)) < 0)
-					printf("e5-modemd: write: %s\n", strerror(errno));
-				else
-					printf("e5-modemd: sent \"%s\"\n", DUMP_COMPLETE);
-			}
-		}
+		if (read_states(&reader, fd, buf, (size_t)n) < 0)
+			break;
 	}
 	printf("e5-modemd: modemd closed the socket\n");
 	close(fd);

@@ -7,6 +7,10 @@ const M=new Function('rpc','baseclass','L',common)({declare:()=>()=>Promise.reso
 const cpu=fs.readFileSync(base+'view/mu300/cpu.js','utf8');
 const labels=[...cpu.matchAll(/text\('([^']*)','([^']*)'\)/g)].map(x=>x[1]);
 labels.push('SIM 卡管理','切换上网卡','开机使用','清空当前卡记录','需要确认清空','与屏幕共用系统双卡短信池');
+labels.push('状态暂不可读，请刷新后重试',
+    '关闭后只停止下次开机回放，已保存的网络、VoLTE 和 VoNR 设置不会被删除。',
+    'VoLTE 用于 4G 通话，VoNR 用于 5G SA 通话。设置按当前查看的 SIM 保存，并跟随“开机自动应用”。',
+    '关闭 VoLTE 或 VoNR 不等于屏蔽全部来电和短信，传统网络业务仍可能到达。');
 labels.push('切换上网卡后，看板、锁定和 AT 的查看卡槽会同步；仍可手动查看另一张卡。');
 for(const lang of ['en','tr']) {
     L.env.lang=lang;

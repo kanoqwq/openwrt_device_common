@@ -3,6 +3,7 @@
 # modem_control waits for it before it resets the CP -- 300 s without it.  It
 # connects once modem_control is up, and is restarted when that goes away.
 START=22
+STOP=09
 USE_PROCD=1
 
 start_service() {

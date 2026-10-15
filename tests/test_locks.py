@@ -28,8 +28,11 @@ class LocksTest(unittest.TestCase):
         self.band = {0:[0,482,0,149,0],3:[549,0,272,0]}
         self.sent, self.fail, self.ignore = [], None, None
         self.restarts = 0
+        self.reset_bands_on_restart = False
         self.reset_mode_on_restart = False
         self.omit_final = None
+        self.restart_result = (0, '', '')
+        self.voice = {'volte': True, 'vonr': False}
         p = patch.object(locks.subprocess, 'run', side_effect=self.run_command)
         p.start();self.addCleanup(p.stop)
         p = patch.object(locks.time, 'sleep');p.start();self.addCleanup(p.stop)
@@ -62,22 +65,31 @@ class LocksTest(unittest.TestCase):
         if argv[0] == locks.RESTART:
             self.restarts += 1
             if self.reset_mode_on_restart: self.tm[0] = 134
-            return subprocess.CompletedProcess(argv,0,'','')
+            if self.reset_bands_on_restart: self.band = {0:[0,0,0,1,0],3:[0,0,16,0]}
+            self.assertEqual(argv, [locks.RESTART, '--settings'])
+            return subprocess.CompletedProcess(argv, *self.restart_result)
         cmd = argv[-1];self.sent.append(cmd)
         if cmd == self.fail: return subprocess.CompletedProcess(argv,1,'','AT channel quarantined')
         data = ''
         if cmd == 'AT+SPTESTMODE?': data = '+SPTESTMODE: '+','.join(map(str,self.tm))
         elif cmd == 'AT+SP5GRAN?': data = '+SP5GRAN: '+str(self.gran)
         elif cmd == 'AT+SPENDC?': data = '+ENDC: '+str(self.endc)
+        elif cmd == 'AT+CAVIMS?': data = '+CAVIMS: '+str(int(self.voice['volte']))
+        elif cmd == 'AT+SP5GCMDS="get nr synch_param",42':
+            data = '+SP5GCMDS: "get nr synch_param",42,'+str(int(self.voice['vonr']))
+        elif cmd.startswith(('AT+CAVIMS=', 'AT+SP5GCMDS="set nr param",45,')):
+            key = 'volte' if cmd.startswith('AT+CAVIMS=') else 'vonr'
+            if cmd != self.ignore: self.voice[key] = cmd[-1] == '1'
         elif cmd == 'AT+SP5GCMDS="get nr support_band"': data = '+SP5GCMDS: get nr support_band,6,41,78,1,8,28,5'
         elif cmd.startswith('AT+SPTESTMODE='):
             if cmd != self.ignore:self.tm = list(map(int,cmd.split('=')[1].split(',')))
         elif cmd.startswith('AT+SP5GRAN='):self.gran = int(cmd.split('=')[1])
-        elif cmd.startswith('AT+SPENDC='):self.endc = 1 if cmd.endswith('=1') else 0
+        elif cmd.startswith('AT+SPENDC='):
+            if cmd != self.ignore:self.endc = 1 if cmd.endswith('=1') else 0
         elif cmd.startswith('AT+SPLBAND='):
             v = list(map(int,cmd.split('=')[1].split(',')))
             if len(v)==1:data = '+SPLBAND: '+','.join(map(str,self.band[v[0]]))
-            else:self.band[0 if v[0]==1 else 3] = v[1:]
+            elif cmd != self.ignore:self.band[0 if v[0]==1 else 3] = v[1:]
         elif cmd.startswith('AT+SPFORCEFRQ='):
             v = list(map(int,cmd.split('=')[1].split(',')))
             if v[1]==3:data = '+SPFORCEFRQ: '+','.join(map(str,v+self.cells[v[0]]))
@@ -143,6 +155,81 @@ class LocksTest(unittest.TestCase):
         locks.apply('endc','off')
         self.assertEqual(locks.snapshot()['endc'],'0')
         self.assertEqual((locks.STATE/'endc').read_text(),'off')
+
+    def test_voice_switches_save_per_sim_without_radio_cycle_or_data_switch(self):
+        base, run, marker = locks.STATE, locks.RUN, locks.MARKER
+        with patch.dict(locks.os.environ):
+            locks.scope(1, base, run, marker)
+            for kind, val in [('volte','off'), ('vonr','on')]:
+                locks.apply(kind, val)
+                self.assertEqual((base/f'sim1/{kind}').read_text(), val)
+                self.assertFalse((base/f'sim0/{kind}').exists())
+            self.assertFalse(self.voice['volte'])
+            self.assertTrue(self.voice['vonr'])
+            self.assertEqual(locks.CARD.read_text(), '0')
+            self.assertEqual(self.restarts, 0)
+            self.assertNotIn('AT+CASIMS=0', self.sent)
+
+    def test_failed_voice_read_keeps_other_locks_but_disables_toggle(self):
+        locks.apply('volte', 'off')
+        def reject(command, timeout=8):
+            if command == 'AT+CAVIMS?': raise RuntimeError('AT+CAVIMS?: ERROR')
+            return original(command, timeout)
+        original = locks.at
+        with patch.object(locks, 'at', side_effect=reject):
+            state = locks.snapshot(refresh_voice=True)
+            self.assertEqual(state['mode']['label'], '4g')
+            self.assertNotIn('ims', state)
+            self.assertIsNone(state['volte']['enabled'])
+            self.assertEqual(state['volte']['source'], 'unknown')
+            self.assertIs(state['vonr']['enabled'], False)
+
+    def test_voice_set_failure_never_saves_or_claims_success(self):
+        self.omit_final = 'AT+CAVIMS=0'
+        self.assertEqual(locks.main(['apply', 'volte', 'off'])['state'], 'error')
+        self.assertFalse((locks.STATE/'volte').exists())
+        self.assertFalse((locks.RUN/'volte-applied.json').exists())
+        self.omit_final = None
+        for kind, command in [('volte','AT+CAVIMS=0'), ('vonr','AT+SP5GCMDS="set nr param",45,1')]:
+            self.voice = {'volte': True, 'vonr': False}
+            self.ignore = command
+            self.assertEqual(locks.main(['apply',kind,'off' if kind=='volte' else 'on'])['state'], 'error')
+            self.assertFalse((locks.STATE/kind).exists())
+
+    def test_voice_only_boot_replay_is_once_and_preserves_preferences(self):
+        (locks.STATE/'ims').write_text('off')  # removed settings must be inert
+        for kind, val in [('volte','off'), ('vonr','on')]:
+            (locks.STATE/kind).write_text(val)
+        result = locks.replay('early')
+        self.assertEqual(result['state'], 'done')
+        self.assertEqual(result['applied'], ['volte','vonr'])
+        count = len(self.sent)
+        self.assertEqual(locks.replay('early')['skipped'], 1)
+        self.assertEqual(len(self.sent), count)
+        self.assertEqual(self.restarts, 0)
+        self.assertNotIn('AT+IMSEN?', self.sent)
+        self.assertNotIn('AT+IMSEN=0', self.sent)
+        self.assertEqual(self.sent.count('AT+CAVIMS=0'), 1)
+
+    def test_removed_ims_is_rejected_and_old_preference_never_replayed(self):
+        (locks.STATE/'ims').write_text('off')
+        self.assertEqual(locks.replay('early')['skipped'], 1)
+        with self.assertRaises(ValueError): locks.apply('ims', 'off')
+        self.assertEqual(self.sent, [])
+
+    def test_cavims_reports_native_state_not_saved_preference(self):
+        (locks.STATE/'volte').write_text('off')
+        state = locks.snapshot(refresh_voice=True)
+        self.assertIs(state['volte']['enabled'], True)
+        self.assertEqual(state['volte']['saved'], 'off')
+        self.assertEqual(state['volte']['source'], 'modem')
+        self.assertEqual(self.sent.count('AT+CAVIMS?'), 1)
+
+    def test_malformed_voice_readback_cannot_be_saved_as_enabled(self):
+        with patch.object(locks, 'value', return_value='get nr synch_param,41,1'):
+            with self.assertRaisesRegex(RuntimeError, 'VoNR'): locks.read_voice('vonr')
+        with patch.object(locks, 'value', return_value='get nr synch_param,42,2'):
+            with self.assertRaisesRegex(RuntimeError, 'VoNR'): locks.read_voice('vonr')
 
     def test_cell_add_and_unlock_verified(self):
         locks.apply('cell','lte:3740,36')
@@ -221,6 +308,87 @@ class LocksTest(unittest.TestCase):
         self.assertEqual(locks.replay('early')['state'],'error')
         self.assertFalse(locks.MARKER.exists())
 
+    def test_offline_reconnect_is_deferred_and_setting_is_saved(self):
+        self.restart_result = (0, 'RECONNECT-DEFERRED failed\n', '')
+        for kind, val in [('mode', 'auto'), ('lte', '1,3'), ('nr', '1,41,78'),
+                          ('cell', 'lte:3740,36'), ('bands_default', '')]:
+            with self.subTest(kind=kind):
+                result = locks.main(['apply', kind, val])
+                self.assertEqual(result['state'], 'done', result)
+                self.assertEqual(result['reconnect'], 'deferred')
+                self.assertEqual(result['reconnect_reason'], 'failed')
+                self.assertTrue((locks.STATE / ('nr' if kind == 'bands_default' else kind)).exists())
+
+    def test_reconnect_failure_does_not_lose_accepted_setting(self):
+        self.restart_result = (1, '', 'Wrong state: modem in failed state')
+        result = locks.main(['apply', 'mode', 'auto'])
+        self.assertEqual(result['state'], 'done', result)
+        self.assertEqual(result['reconnect'], 'failed')
+        self.assertIn('failed state', result['reconnect_error'])
+        self.assertEqual((locks.STATE/'mode').read_text(), 'auto')
+
+    def test_reconnect_timeout_preserves_setting_and_reports_reconnect_failure(self):
+        original = self.run_command
+        def timeout(argv, **kwargs):
+            if argv[0] == locks.RESTART: raise subprocess.TimeoutExpired(argv, 75)
+            return original(argv, **kwargs)
+        with patch.object(locks.subprocess, 'run', side_effect=timeout):
+            result = locks.main(['apply', 'mode', 'auto'])
+        self.assertEqual(result['state'], 'done', result)
+        self.assertEqual(result['reconnect'], 'failed')
+        self.assertEqual((locks.STATE/'mode').read_text(), 'auto')
+
+    def test_interactive_missing_final_requires_exact_readback_without_resending(self):
+        for kind, val, command in [('endc','on','AT+SPENDC=1'),
+                                   ('mode','auto','AT+SPTESTMODE=134,134,0'),
+                                   ('mode','sa','AT+SP5GRAN=1')]:
+            with self.subTest(kind=kind, command=command):
+                self.sent.clear()
+                self.omit_final = command
+                result = locks.main(['apply', kind, val])
+                self.assertEqual(result['state'], 'done', result)
+                self.assertEqual(self.sent.count(command), 1)
+                self.assertTrue((locks.STATE/kind).exists())
+
+    def test_interactive_missing_final_with_wrong_or_unreadable_state_is_failure(self):
+        for fail_read in (False, True):
+            with self.subTest(fail_read=fail_read):
+                self.sent.clear(); self.endc = 0
+                self.omit_final = self.ignore = 'AT+SPENDC=1'
+                self.fail = 'AT+SPENDC?' if fail_read else None
+                result = locks.main(['apply', 'endc', 'on'])
+                self.assertEqual(result['state'], 'error', result)
+                self.assertEqual(self.sent.count('AT+SPENDC=1'), 1)
+                self.assertFalse((locks.STATE/'endc').exists())
+
+    def test_unrelated_snapshot_failure_does_not_invalidate_verified_mode_or_endc(self):
+        with patch.object(locks, 'snapshot', side_effect=RuntimeError('bands unavailable')):
+            for kind, val in [('mode','auto'), ('endc','on')]:
+                result = locks.main(['apply',kind,val])
+                self.assertEqual(result['state'], 'done', result)
+                self.assertEqual(result['refresh_error'], 'bands unavailable')
+                self.assertEqual((locks.STATE/kind).read_text(), val)
+
+    def test_interactive_band_without_ack_cannot_be_proven_by_readback(self):
+        self.omit_final = 'AT+SPLBAND=2,1,0,272,0'
+        result = locks.main(['apply', 'nr', '1,41,78'])
+        self.assertEqual(result['state'], 'error', result)
+        self.assertFalse((locks.STATE/'nr').exists())
+        self.assertEqual(self.restarts, 0)
+
+    def test_explicit_endc_error_is_not_recovered_or_saved(self):
+        original = self.run_command
+        def reject(argv, **kwargs):
+            if argv[-1] == 'AT+SPENDC=1':
+                self.sent.append(argv[-1])
+                return subprocess.CompletedProcess(argv, 1, 'ERROR\n', '')
+            return original(argv, **kwargs)
+        with patch.object(locks.subprocess, 'run', side_effect=reject):
+            result = locks.main(['apply', 'endc', 'on'])
+        self.assertEqual(result['state'], 'error', result)
+        self.assertNotIn('AT+SPENDC?', self.sent)
+        self.assertFalse((locks.STATE/'endc').exists())
+
     def test_nr_capability_count_is_not_a_band(self):
         self.assertEqual(locks.nr_capabilities(),[1,5,8,28,41,78])
 
@@ -255,5 +423,61 @@ class LocksTest(unittest.TestCase):
         result=locks.main(['apply','mode','4g'])
         self.assertEqual(result['state'],'error')
         self.assertFalse((locks.STATE/'mode').exists())
+
+    def test_band_acknowledged_with_different_readback_is_saved(self):
+        for kind, val, command, key in [
+                ('lte', '1,3', 'AT+SPLBAND=1,0,0,0,5,0', 0),
+                ('nr', '1,41,78', 'AT+SPLBAND=2,1,0,272,0', 3)]:
+            with self.subTest(kind=kind):
+                self.ignore = command
+                result = locks.main(['apply', kind, val])
+                self.assertEqual(result['state'], 'done', result)
+                self.assertEqual((locks.STATE/kind).read_text(), val)
+                self.assertEqual(locks.read_json(locks.RUN/'lock.json')[kind], locks.band_state(kind))
+                self.assertFalse(locks.matches_saved(kind, val, locks.snapshot()))
+
+    def test_band_readback_may_change_after_reconnect(self):
+        self.reset_bands_on_restart = True
+        for kind, val in [('lte', '1,3'), ('nr', '1,41,78')]:
+            result = locks.main(['apply', kind, val])
+            self.assertEqual(result['state'], 'done', result)
+            self.assertEqual((locks.STATE/kind).read_text(), val)
+        self.assertEqual(self.restarts, 2)
+
+    def test_band_only_status_refresh_failure_does_not_fail_accepted_write(self):
+        with patch.object(locks, 'band_state', side_effect=RuntimeError('status unavailable')):
+            self.assertEqual(locks.main(['apply', 'lte', '1,3'])['state'], 'done')
+        self.assertEqual((locks.STATE/'lte').read_text(), '1,3')
+
+    def test_band_command_failure_still_fails_without_persisting(self):
+        self.fail = 'AT+SPLBAND=1,0,0,0,5,0'
+        result = locks.main(['apply', 'lte', '1,3'])
+        self.assertEqual(result['state'], 'error')
+        self.assertFalse((locks.STATE/'lte').exists())
+
+    def test_band_replay_accepts_normalized_mask_without_late_restart(self):
+        (locks.STATE/'nr').write_text('1,41,78')
+        self.ignore = 'AT+SPLBAND=2,1,0,272,0'
+        result = locks.replay('early')
+        self.assertEqual(result['state'], 'done', result)
+        self.assertEqual(self.sent.count(self.ignore), 1)
+        self.assertTrue(locks.MARKER.exists())
+        self.assertEqual(self.restarts, 0)
+        self.assertEqual(locks.main(['verify']), {'ok': 1})
+
+    def test_band_replay_no_ack_is_not_proven_by_matching_old_mask(self):
+        (locks.STATE/'nr').write_text('1,41,78')
+        self.omit_final = 'AT+SPLBAND=2,1,0,272,0'
+        result = locks.replay('early')
+        self.assertEqual(result['state'], 'error', result)
+        self.assertFalse(locks.MARKER.exists())
+        self.assertEqual(self.restarts, 0)
+
+    def test_default_bands_may_be_normalized_after_reconnect(self):
+        self.reset_bands_on_restart = True
+        locks.apply('bands_default', '')
+        self.assertEqual(self.restarts, 1)
+        self.assertEqual((locks.STATE/'lte').read_text(), ','.join(map(str, locks.LTE)))
+        self.assertEqual((locks.STATE/'nr').read_text(), '')
 
 if __name__=='__main__':unittest.main()

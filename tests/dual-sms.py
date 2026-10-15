@@ -75,6 +75,35 @@ class Inbox(unittest.TestCase):
     def fresh(self):
         return {'version':1,'next_id':receiver.MIN_ID,'initialized':[],'messages':[],'slots':{}}
 
+    def test_web_read_and_screen_read_all_share_persisted_unread_projection(self):
+        data=self.fresh()
+        for card in (0,1):
+            receiver.ingest(data,card,'card'+str(card),[],1)
+            receiver.ingest(data,card,'card'+str(card),sms_pdu.assemble([incoming('new',card+1)]),2)
+        ids=[m['id'] for m in data['messages']]
+        path=TOP/'device/openwrt_device_common/luci-app-t551m/root/usr/libexec/unisoc-modem/t551m-sms'
+        loader=importlib.machinery.SourceFileLoader('sms_web',str(path))
+        spec=importlib.util.spec_from_loader(loader.name,loader)
+        web=importlib.util.module_from_spec(spec);loader.exec_module(web)
+        def local_run(argv,timeout=30):
+            if argv==[web.TOOL,'list']:return receiver.inbox()
+            if argv[:2]==[web.RECEIVER,'read']:return receiver.mark_read(int(argv[2]))
+            self.fail('Unexpected web operation: '+repr(argv))
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            with patch.object(receiver,'DATA',root/'data'),patch.object(receiver,'RUN',root/'run'),patch.object(receiver,'INBOX',root/'data/inbox.json'),patch.object(receiver,'at') as modem,patch.object(web,'run',side_effect=local_run),patch.object(web,'hidden',return_value=set()):
+                with receiver.locked():receiver.save(data)
+                unread=root/'run/unread'
+                self.assertEqual(len(unread.read_text().splitlines()),2)
+                self.assertTrue(web.main('show',{'id':str(ids[0])})['ok'])
+                self.assertEqual(unread.read_text(),f'/org/freedesktop/ModemManager1/SMS/{ids[1]}\n')
+                self.assertEqual([m['unread'] for m in receiver.load()['messages']],[False,True])
+                # The screen's existing read-all operation clears BOTH slots.
+                self.assertTrue(receiver.mark_read()['ok'])
+                self.assertEqual(unread.read_text(),'')
+                self.assertFalse(any(m['unread'] for m in receiver.load()['messages']))
+                modem.assert_not_called()
+
     def test_capacity_release_requires_durable_copy_and_matching_sim_and_pdu(self):
         ccid='89860012345678901234'; identity=hashlib.sha256(ccid.encode()).hexdigest()
         for failure in ['', 'archive', 'identity', 'index', 'inbox']:

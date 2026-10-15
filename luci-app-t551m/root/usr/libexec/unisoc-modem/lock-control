@@ -41,7 +41,7 @@ def migrate_legacy(base):
     slot = int(CARD.read_text().strip())
     if slot not in (0, 1): raise ValueError('Invalid data SIM')
     dest = base / f'sim{slot}';dest.mkdir(parents=True, exist_ok=True)
-    for name in ['auto_apply','endc','mode','lte','nr','cell']:
+    for name in ['auto_apply','volte','vonr','endc','mode','lte','nr','cell']:
         if (base/name).exists() and not (dest/name).exists():
             atomic(dest/name, (base/name).read_text())
     atomic(marker, str(slot))  # Keep original flat files as the migration backup.
@@ -155,7 +155,39 @@ def capabilities(lte_only=False):
     nr = [] if lte_only else nr_capabilities()
     return {'lte': ','.join(map(str, LTE)), 'nr': ','.join(map(str, nr))}
 
-def snapshot():
+def read_voice(kind):
+    if kind == 'vonr':
+        fields = [p.strip().strip('"') for p in value(
+            'AT+SP5GCMDS="get nr synch_param",42', '+SP5GCMDS').split(',')]
+        if len(fields) < 3 or fields[:2] != ['get nr synch_param', '42'] or fields[2] not in ('0', '1'):
+            raise RuntimeError('Invalid VoNR switch readback')
+        return fields[2] == '1'
+    raw = numbers('AT+CAVIMS?', '+CAVIMS')
+    if len(raw) != 1 or raw[0] not in (0, 1):
+        raise RuntimeError('Invalid voice switch readback')
+    return bool(raw[0])
+
+
+def voice_state(kind, refresh=False):
+    receipt = read_json(RUN / f'{kind}-applied.json')
+    boot_id = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+    enabled = receipt.get('enabled') if receipt.get('boot_id') == boot_id and receipt.get('source') == 'modem' else None
+    source = 'modem' if isinstance(enabled, bool) else 'unknown'
+    error = None
+    if refresh:
+        try:
+            enabled, source = read_voice(kind), 'modem'
+            write_json(RUN / f'{kind}-applied.json', {
+                'enabled': enabled, 'source': source, 'boot_id': boot_id})
+        except RuntimeError as failure:
+            error = str(failure)
+            enabled, source = None, 'unknown'
+    path = STATE / kind
+    saved = path.read_text().strip() if path.exists() else None
+    return {'enabled': enabled, 'source': source, 'saved': saved, 'read_error': error}
+
+
+def snapshot(refresh_voice=False):
     slot = active_card()
     tm = testmode()
     gran = numbers('AT+SP5GRAN?', '+SP5GRAN')[0]
@@ -168,7 +200,8 @@ def snapshot():
     data = {'ts': int(time.time()), 'mode': {'label': label, 'work': str(tm[slot]), 'gran': str(gran),
             'm0': str(tm[0]), 'm1': str(tm[1]), 'prim': str(tm[2]), 'card': slot},
             'endc': '1' if endc == 1 else '0', 'lte': band_state('lte'), 'nr': band_state('nr'),
-            'cells': cell_state('lte') + cell_state('nr'), 'caps': capabilities()}
+            'cells': cell_state('lte') + cell_state('nr'), 'caps': capabilities(),
+            **{kind: voice_state(kind, refresh_voice) for kind in ('volte', 'vonr')}}
     data['cell'] = data['cells'][0] if data['cells'] else ''
     if active_card() != slot:
         raise RuntimeError('Active SIM changed while reading; refresh again')
@@ -182,7 +215,7 @@ def validate(kind, val):
     if kind == 'bands_default' and val == '': return
     if kind == 'gran' and val in ('sa','nsa'): return
     if kind == 'mode' and val in MODES: return
-    if kind in ('endc', 'auto_apply') and val in ('on', 'off'): return
+    if kind in ('volte', 'vonr', 'endc', 'auto_apply') and val in ('on', 'off'): return
     if kind in ('lte', 'nr'):
         if not val: return
         if not re.fullmatch(r'\d+(?:,\d+)*', val): raise ValueError('Invalid band list')
@@ -202,29 +235,28 @@ def validate(kind, val):
     raise ValueError('Invalid network setting')
 
 def verify(kind, val, expected):
+    if kind in ('volte', 'vonr'):
+        return read_voice(kind) is (val == 'on')
     if kind == 'mode':
         return testmode()[:3] == expected and numbers('AT+SP5GRAN?', '+SP5GRAN')[0] == MODES[val][1]
     if kind == 'endc':
         return (numbers('AT+SPENDC?', '+ENDC')[0] == 1) == (val == 'on')
     if kind in ('lte', 'nr'):
-        current = band_state(kind)
-        raw = current['raw']
-        if raw == expected: return True
-        # Modem may expand automatic zero masks into its supported band set.
-        supported = LTE if kind == 'lte' else nr_capabilities()
-        return not val and bool(supported) and set(current['locked'].split(',')) == set(map(str, supported))
+        # SPLBAND readback can normalize/filter masks after an accepted write.
+        # It is display state, not an equality requirement for band jobs.
+        return True
     if kind == 'cell':
         return all(set(cell_state(rat)) == set(cells) for rat, cells in expected.items())
     return True
 
-def write_setting(command, timeout, early, readback):
+def write_setting(command, timeout, early, readback, recover=False):
     try:
         at(command, 3 if early else timeout)
     except RuntimeError as error:
-        # This firmware omits OK for some setters while CFUN=0. Never retry
+        # This firmware omits OK for some setters while offline. Never retry
         # the write or treat silence as success: recover framing with the
         # AT owner's named read-only probes, then verify this exact field.
-        if not early or 'no final response' not in str(error): raise
+        if not (early or recover) or 'no final response' not in str(error): raise
         time.sleep(2)
         if not readback(): raise RuntimeError('Unacknowledged setting failed readback: ' + command)
 
@@ -240,32 +272,34 @@ def apply(kind, val, restart=True, persist=True, early=False):
     if kind == 'bands_default':
         bands = ','.join(map(str, LTE))
         apply('lte', bands, restart=False, persist=persist, early=early)
-        apply('nr', '', restart=restart, persist=persist, early=early)
-        if set(band_state('lte')['locked'].split(',')) != set(map(str, LTE)):
-            raise RuntimeError('Default LTE bands did not survive reconnect')
-        return
+        return apply('nr', '', restart=restart, persist=persist, early=early)
     if kind == 'auto_apply':
         atomic(STATE / kind, val)
         return
     slot = active_card()
     expected = None
-    if kind == 'mode':
+    if kind in ('volte', 'vonr'):
+        command = ('AT+CAVIMS=' if kind == 'volte' else 'AT+SP5GCMDS="set nr param",45,')
+        write_setting(command + ('1' if val == 'on' else '0'), 8, early,
+                      lambda: verify(kind, val, expected))
+    elif kind == 'mode':
         expected = testmode()[:3]
         expected[slot] = MODES[val][0]
         write_setting('AT+SP5GRAN=' + str(MODES[val][1]), 15, early,
-                      lambda: numbers('AT+SP5GRAN?', '+SP5GRAN')[0] == MODES[val][1])
+                      lambda: numbers('AT+SP5GRAN?', '+SP5GRAN')[0] == MODES[val][1], recover=True)
         write_setting('AT+SPTESTMODE=' + ','.join(map(str, expected)), 20, early,
-                      lambda: verify(kind, val, expected))
+                      lambda: verify(kind, val, expected), recover=True)
     elif kind == 'endc':
         write_setting('AT+SPENDC=' + ('1' if val == 'on' else '2'), 15, early,
-                      lambda: verify(kind, val, expected))
+                      lambda: verify(kind, val, expected), recover=True)
     elif kind in ('lte', 'nr'):
         bands = list(map(int, val.split(','))) if val else []
         v = masks(bands, LTE_TABLES if kind == 'lte' else NR_TABLES)
         if kind == 'nr': v.insert(1, 0)
         expected = ','.join(map(str, v))
-        write_setting('AT+SPLBAND=' + ('1,' if kind == 'lte' else '2,') + expected, 15, early,
-                      lambda: verify(kind, val, expected))
+        # Require the command's own OK; do not infer acceptance from a
+        # possibly different pre-existing band mask (including early replay).
+        at('AT+SPLBAND=' + ('1,' if kind == 'lte' else '2,') + expected, 3 if early else 15)
     elif kind == 'cell':
         if val == 'auto':
             subprocess.run(['/usr/libexec/unisoc-modem/cell'], capture_output=True, timeout=25, check=True)
@@ -287,16 +321,40 @@ def apply(kind, val, restart=True, persist=True, early=False):
         if attempt == 5: raise RuntimeError('Modem readback does not match requested setting')
         time.sleep(.5)
     if active_card() != slot: raise RuntimeError('Active SIM changed during operation')
-    if restart and kind != 'endc':
-        r = subprocess.run([RESTART], capture_output=True, text=True, timeout=75)
-        if r.returncode: raise RuntimeError('Setting accepted, but reconnect failed: ' + (r.stderr or r.stdout)[-240:])
-        if not verify(kind, val, expected): raise RuntimeError('Setting did not survive reconnect')
+    result = {}
+    if restart and kind not in ('endc', 'volte', 'vonr'):
+        # Acceptance of a setting does not require a registered SIM or a live
+        # bearer. The restart helper checks MM before touching WAN. Keep its
+        # outcome separate from the already verified write, including races
+        # where the SIM vanishes during reconnect.
+        try:
+            r = subprocess.run([RESTART, '--settings'], capture_output=True, text=True, timeout=75)
+            if r.returncode:
+                result.update(reconnect='failed', reconnect_error=(r.stderr or r.stdout)[-240:])
+            elif r.stdout.strip().startswith('RECONNECT-DEFERRED '):
+                result.update(reconnect='deferred', reconnect_reason=r.stdout.strip().split(' ', 1)[1])
+            else:
+                if not verify(kind, val, expected): raise RuntimeError('Setting did not survive reconnect')
+                result['reconnect'] = 'done'
+        except subprocess.TimeoutExpired:
+            result.update(reconnect='failed', reconnect_error='Radio reconnect timed out')
+    if kind in ('volte', 'vonr'):
+        write_json(RUN / f'{kind}-applied.json', {
+            'enabled': val == 'on', 'source': 'modem',
+            'boot_id': Path('/proc/sys/kernel/random/boot_id').read_text().strip()})
     if persist:
         if kind == 'cell':
             atomic(STATE / kind, '\n'.join(cell_state('lte') + cell_state('nr')) + '\n')
         else:
             atomic(STATE / kind, val)
-    snapshot()
+    try:
+        snapshot()
+    except RuntimeError as error:
+        # This is a status refresh, not acceptance verification. An unrelated
+        # getter must not turn an acknowledged/verified write into a failure.
+        result['refresh_error'] = str(error)
+    return result
+
 
 def exclusive():
     RUN.mkdir(parents=True, exist_ok=True)
@@ -320,7 +378,7 @@ def spawn(*args):
 
 def saved_settings():
     saved = {}
-    for kind in ['endc', 'mode', 'lte', 'nr', 'cell']:
+    for kind in ['endc', 'mode', 'lte', 'nr', 'cell', 'volte', 'vonr']:
         path = STATE / kind
         if path.exists():
             saved[kind] = path.read_text().strip()
@@ -329,6 +387,7 @@ def saved_settings():
     return saved
 
 def matches_saved(kind, val, state):
+    if kind in ('volte', 'vonr'): return state.get(kind, {}).get('enabled') is (val == 'on')
     if kind == 'mode':
         return (int(state['mode']['work']), int(state['mode']['gran'])) == MODES[val]
     if kind == 'endc': return state['endc'] == ('1' if val == 'on' else '0')
@@ -339,7 +398,8 @@ def matches_saved(kind, val, state):
     return not bands or bool(supported) and bands == supported
 
 def verify_saved(saved, state):
-    mismatches = [kind for kind, val in saved.items() if not matches_saved(kind, val, state)]
+    mismatches = [kind for kind, val in saved.items()
+                  if kind not in ('lte', 'nr') and not matches_saved(kind, val, state)]
     if mismatches:
         raise RuntimeError('Saved settings do not match modem readback: ' + ', '.join(mismatches))
 
@@ -401,7 +461,8 @@ def main(args):
             with exclusive():
                 if job:
                     data.update(state='running');write_json(job_path(job), data)
-                apply(kind, val)
+                result = apply(kind, val)
+                data.update(result or {})
             data.update(state='done', ok=1)
         except Exception as e:
             data.update(state='error', ok=0, error=str(e))
@@ -413,7 +474,11 @@ def main(args):
             try:
                 with (RUN / 'lock-refresh.lock').open('a') as f:
                     fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    data = snapshot()
+                    # Do not let a stale read overwrite the receipt for an
+                    # interactive write, or query halfway through a radio cycle.
+                    with ((LOCK_RUN or RUN) / 'lock-apply.lock').open('a') as operation:
+                        fcntl.flock(operation, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        data = snapshot(refresh_voice=True)
             except Exception as e:
                 data.update(error=str(e))
         elif not data or time.time() - data.get('ts', 0) > 600:

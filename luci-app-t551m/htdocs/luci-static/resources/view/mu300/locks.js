@@ -4,7 +4,7 @@
 'require mu300.common as M';
 
 /* Network settings use verified asynchronous jobs. Each operation reports its
- * own completion/error; modem readback, not cache timestamps, proves success. */
+ * own completion/error; bands require command acknowledgement, other fields verify. */
 
 var MODES = [ [ 'auto', '自动' ], [ '5g4g', '5G/4G' ], [ '4g', '仅 4G' ], [ 'sa', '5G SA' ], [ 'nsa', '5G NSA' ] ];
 var NR_CAND = [], LTE_CAND = []; /* 读取后端能力后再显示，避免短暂展示错误频段。 */
@@ -44,7 +44,20 @@ return view.extend({
   <div class="mud-ctl" style="margin-top:7px;max-width:340px">
     <button class="mud-btn" id="mud-lock-auto-apply">开机自动应用</button>
   </div>
-  <div class="mud-note">关闭后只停止下次开机回放，已保存的网络模式、EN-DC、频段和小区配置不会被删除。</div>
+  <div class="mud-note">关闭后只停止下次开机回放，已保存的网络、VoLTE 和 VoNR 设置不会被删除。</div>
+</div>
+
+<div class="mud-sec">
+  <h3>VoLTE · VoNR</h3>
+  <div class="mud-note">VoLTE 用于 4G 通话，VoNR 用于 5G SA 通话。设置按当前查看的 SIM 保存，并跟随“开机自动应用”。</div>
+  ${['volte','vonr'].map(function(kind) {
+    var name = {volte:'VoLTE',vonr:'VoNR'}[kind];
+    return '<div class="mud-r mud-voice-row"><span class="mud-k">'+name+'</span>'+
+      '<span class="mud-v" id="mud-lock-'+kind+'-state">--</span>'+
+      '<button type="button" class="mud-btn mud-voice-switch" data-voice="'+kind+'" role="switch" aria-label="'+name+'" aria-checked="false" disabled>'+
+      '<span class="mud-voice-track" aria-hidden="true"></span></button></div>';
+  }).join('')}
+  <div class="mud-note">关闭 VoLTE 或 VoNR 不等于屏蔽全部来电和短信，传统网络业务仍可能到达。</div>
 </div>
 
 <div class="mud-sec">
@@ -100,10 +113,15 @@ return view.extend({
 		/* 主题化确认框替代浏览器 confirm；确认后再进入实际执行 */
 		var apply = function(kind, val, what, opts) {
 			opts = opts || {};
+			var slot = M.simSlot();
 			M.confirmBox('应用「' + what + '」？',
 				opts.noSfun ? '' : '蜂窝连接会重新建立，蜂窝断开约半分钟。',
 				{ danger: !opts.noSfun, okText: '应用' })
-				.then(function(go) { if (go) applyNow(kind, val, what, opts); });
+				.then(function(go) {
+					if (!go || self._disposed) return;
+					if (M.simSlot() !== slot) { self.note('查看卡槽已改变，请重新确认操作', 'info'); return; }
+					applyNow(kind, val, what, opts);
+				});
 		};
 		var applyNow = function(kind, val, what, opts) {
 			if (self._applying) { self.note('请等待当前操作完成', 'info'); return; }
@@ -158,6 +176,16 @@ return view.extend({
 					btn.textContent = on ? '开机自动应用' : '开机自动应用 ✓';
 				} });
 		};
+		root.querySelectorAll('[data-voice]').forEach(function(btn) {
+			btn.onclick = function() {
+				var kind = btn.dataset.voice, state = (self.lastLock || {})[kind];
+				if (self._applying || btn.disabled || !state || typeof state.enabled !== 'boolean') return;
+				var val = state.enabled ? 'off' : 'on';
+				var name = {volte:'VoLTE',vonr:'VoNR'}[kind];
+				apply(kind, val, M.translate(val === 'on' ? '开启' : '关闭')+' '+name,
+					{btn:btn,noSfun:true});
+			};
+		});
 		this.Q('lock-refresh').onclick = function() {
 			var btn = this;
 			M.busy(btn, true);
@@ -334,17 +362,29 @@ return view.extend({
 
 	/* Follow this operation's result; device and browser clocks can differ. */
 	readback: function(operation, btn) {
-		var self = this;
-		return M.waitLockJob(operation).then(function() {
-			return M.callLockGet();
+		var self = this, receipt;
+		return M.waitLockJob(operation).then(function(result) {
+			receipt = result;
+			return M.callLockGet().catch(function() { return null; });
 		}).then(function(l) {
-			if (!l || l.error) throw new Error(l && l.error || '无法读取应用后的状态');
-			self.lastLock = l; self.paint(); self.paintServing(self.lastCell); self.paintNeighbors();
-			self.note('已应用并核对模组状态', 'success');
+			if (l && !l.error) {
+				self.lastLock = l; self.paint(); self.paintServing(self.lastCell); self.paintNeighbors();
+			}
+			if (receipt.reconnect === 'deferred')
+				self.note('设置已保存；当前模组未就绪或射频已关闭，已跳过重连', 'info');
+			else if (receipt.reconnect === 'failed')
+				self.note('设置已接受，但重连失败：' + (receipt.reconnect_error || ''), 'error');
+			else if (!l || l.error || receipt.refresh_error)
+				self.note('设置已应用；状态刷新暂不可用，请稍后刷新', 'info');
+			else self.note(['lte','nr','bands_default'].indexOf(operation.kind || operation.op) >= 0 ?
+				'频段设置已应用，实际频段以模组回读为准' : '已应用并核对模组状态', 'success');
 		}).catch(function(error) {
 			self.note('应用失败：' + (error.message || error), 'error');
 			self.refresh();
-		}).then(function() { self._applying = false; M.busy(btn, false); });
+		}).then(function() {
+			self._applying = false; M.busy(btn, false);
+			if (!self._disposed) self.paintVoiceSwitches(self.lastLock || {});
+		});
 	},
 	refreshSoon: function() {
 		var self = this;
@@ -369,10 +409,28 @@ return view.extend({
 		});
 	},
 
+	paintVoiceSwitches: function(l) {
+		var self = this;
+		['volte','vonr'].forEach(function(kind) {
+			var state = l[kind] || {}, known = typeof state.enabled === 'boolean';
+			var text = M.translate(known ? (state.enabled ? '已开启' : '已关闭') : '状态暂不可读，请刷新后重试');
+			var status = self.Q('lock-'+kind+'-state');
+			if (status) status.textContent = text;
+			var box = self._root;
+			if (box) box.querySelectorAll('[data-voice="'+kind+'"]').forEach(function(btn) {
+				btn.className = 'mud-btn mud-voice-switch'+(known && state.enabled ? ' on' : '');
+				btn.setAttribute('aria-checked', String(known && state.enabled));
+				btn.setAttribute('aria-label', kind === 'volte' ? 'VoLTE' : 'VoNR');
+				btn.disabled = !!self._applying || !known;
+			});
+		});
+	},
+
 	paint: function() {
 		var l = this.lastLock || {};
 		var self = this;
 		this.loading('lock', false, l.error || (!l.mode ? '锁定状态读取失败，请刷新' : null));
+		this.paintVoiceSwitches(l);
 		var setR = function(id, txt) { var e = self.Q(id); if (e) e.textContent = (txt == null || txt === '') ? '--' : txt; };
 		if (l.error) { setR('lock-nrline', l.error); setR('lock-lteline', ''); return; }
 		var MODE_TXT = { auto: '自动（5G/4G）', '4g': '仅 4G', sa: '仅 5G SA', nsa: '仅 5G NSA' };

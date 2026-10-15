@@ -59,6 +59,7 @@ define Package/luci-app-t551m/postinst
 		mkdir -p "$$state"
 		cp -a "$$old"/. "$$state"/
 	fi
+	ucode /usr/libexec/unisoc-modem/disable-channel-analysis || exit 1
 	rm -f /tmp/luci-indexcache /tmp/luci-modulecache/* 2>/dev/null
 	uci -q get luci.languages.tr >/dev/null || uci set luci.languages.tr='Türkçe'
 	uci commit luci

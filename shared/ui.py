@@ -66,7 +66,7 @@ def stage(root, profile='t551m'):
             if srcdir == 'root' and 'etc/config/' in target.as_posix() and target.exists():
                 continue
             target.write_bytes(source_bytes(src) if srcdir != 'lmo' else src.read_bytes())
-            executable = srcdir == 'root' and any(part in src.parts for part in ('init.d', 'hotplug.d', 'libexec'))
+            executable = srcdir == 'root' and any(part in src.parts for part in ('init.d', 'hotplug.d', 'libexec', 'uci-defaults'))
             target.chmod(0o755 if executable else 0o644)
             if srcdir == 'root' and src.relative_to(plugin / srcdir).as_posix() == 'etc/config/unisoc_apn':
                 target.chmod(0o600)

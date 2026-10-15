@@ -385,6 +385,10 @@ printf '"lan":{"leases":%s,"ip":%s,"list":[%s]},' "$(n_or_null "$LAN_LEASES")" "
 DATA_SIM=$(rd /sys/module/sipc_wwan/parameters/card)
 case "$DATA_SIM" in 0|1) ;; *) DATA_SIM=null ;; esac
 printf '"modem":{"alive":%d,"atd":%d,"data_paused":%d,"viewing_data_sim":%d,"data_sim":%s},' "$MODEM_ALIVE" "$ATD_OK" "$DATA_PAUSED" "$VIEW_DATA" "$DATA_SIM"
+# Source a builtin-only boot snapshot; this never changes startup intent.
+BOOT_STATUS_LIBRARY=1
+. "${MU300_DASH_BIN:-/usr/libexec/unisoc-modem}/boot-status"
+printf '"boot":'; boot_status; printf ','
 printf '"capabilities":{"vpn":%d,"dualboot":%d},' "$CAP_VPN" "$CAP_DUALBOOT"
 printf '"conns":%s,' "$(n_or_null "$CONNS")"
 # The accounting worker publishes one atomic JSON line; no extra RPC or AT

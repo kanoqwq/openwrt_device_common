@@ -50,6 +50,7 @@ webhook_fields() {
     json_add_string webhook_body "$webhook_body"
     json_add_string webhook_headers "$webhook_headers"
     json_add_int webhook_timeout "$webhook_timeout"
+    json_add_string webhook_expect "$webhook_expect"
 }
 render_webhook() { # JSON input, no eval or shell expansion of templates
     json_init; json_add_object config
@@ -152,12 +153,59 @@ list_valid() { # newline-delimited list, max count, kind
 $1
 EOF_LIST
 }
+# PR #211: optional top-level JSON success rule; no eval or response in logs.
+answer_rule_valid() {
+    [ -z "$1" ] && return 0
+    [ ${#1} -le 128 ] && one_line "$1" || return 1
+    _answer_key=${1%%=*}; _answer_value=${1#*=}
+    case "$_answer_key" in ''|[0-9]*|*[!A-Za-z0-9_]*) return 1 ;; esac
+    [ ${#_answer_key} -le 64 ] || return 1
+    case "$_answer_value" in
+        ''|*=*) return 1 ;;
+        *[!0-9-]*)
+            [ ${#_answer_value} -le 16 ] || return 1
+            case "$_answer_value" in *[!a-z]*) return 1 ;; esac ;;
+        *) _answer_digits=${_answer_value#-}
+            number "$_answer_digits" && [ ${#_answer_digits} -le 16 ] || return 1 ;;
+    esac
+}
+answer_check() {
+    _expect=${webhook_expect:-}
+    [ "$method" != dingtalk ] || _expect=errcode=0
+    [ -n "$_expect" ] || return 0
+    answer_rule_valid "$_expect" || { DELIVER_RESULT=invalid_forward_config; return 1; }
+    _verdict=$(MU300_FORWARD_EXPECT="$_expect" ucode "${MU300_FORWARD_ANSWER:-/usr/libexec/unisoc-modem/forward-answer.uc}" "$1" 2>/dev/null) || _verdict=none
+    case "$_verdict" in
+        ok) return 0 ;;
+        differs) DELIVER_RESULT=service_rejected ;;
+        *) DELIVER_RESULT=service_answer_missing ;;
+    esac
+    return 1
+}
+clear_history() {
+    ensure_base || { reply_error forward_storage_failed; return; }
+    exec 8> "$BASE/state.lock"
+    flock -n 8 || { reply_error forward_busy; return; }
+    # Only remove the log name: never truncate a symlink's target or touch cursors.
+    rm -f -- "$HISTORY" || { reply_error forward_storage_failed; return; }
+    reply_ok
+}
+test_gate() {
+    local uptime idle last=0
+    read -r uptime idle < /proc/uptime || return 1
+    uptime=${uptime%%.*}
+    [ ! -r "$ROOT_RESULT.test-at" ] || read -r last < "$ROOT_RESULT.test-at"
+    number "$last" && number "$uptime" || return 1
+    [ "$uptime" -lt "$last" ] || [ "$last" = 0 ] || [ "$((uptime - last))" -ge 5 ] || return 1
+    printf '%s\n' "$uptime" > "$ROOT_RESULT.test-at"
+}
+
 load_config() {
     enabled=0 method=webhook webhook_url= dingtalk_webhook= dingtalk_secret=
     sms_to_phone= smtp_host= smtp_port=465 smtp_username= smtp_to= smtp_password=
     power_forward_enabled=0 blacklist_phone= blacklist_keywords= nickname= template_language=
     smtp_forward_device_info=0 dingtalk_forward_device_info=0 sms_forward_device_info=0
-    webhook_method=POST webhook_content_type=application/json webhook_body= webhook_headers= webhook_timeout=12
+    webhook_method=POST webhook_content_type=application/json webhook_body= webhook_headers= webhook_timeout=12 webhook_expect=
     [ -s "$CONFIG" ] || return 0
     json_load_file "$CONFIG" 2>/dev/null || return 1
     json_get_vars enabled method webhook_url dingtalk_webhook dingtalk_secret sms_to_phone
@@ -170,6 +218,7 @@ load_config() {
     json_get_var webhook_body webhook_body ''
     json_get_var webhook_headers webhook_headers ''
     json_get_var webhook_timeout webhook_timeout 12
+    json_get_var webhook_expect webhook_expect ''
 }
 load_state() {
     last_id=0 since=0 power_percent=-1 power_status=none
@@ -215,7 +264,7 @@ write_result() { printf '%s|%s\n' "$1" "$2" > "$RESULT.tmp.$$" && mv -f "$RESULT
 record_delivery() { # kind only; never store destination, source or message content
     case "$1" in sms|power|test) ;; *) return 1 ;; esac
     case "$method" in webhook|dingtalk|smtp|sms) ;; *) return 1 ;; esac
-    case "$DELIVER_RESULT" in sent|disabled|self_forward_blocked|message_too_long|storage_failed|source_unavailable|power_unavailable|invalid_config|invalid_forward_config|invalid_destination|delivery_failed|smtp_auth_failed) ;; *) return 1 ;; esac
+    case "$DELIVER_RESULT" in sent|disabled|self_forward_blocked|message_too_long|storage_failed|source_unavailable|power_unavailable|invalid_config|invalid_forward_config|invalid_destination|delivery_failed|smtp_auth_failed|service_rejected|service_answer_missing) ;; *) return 1 ;; esac
     # Writers already hold state.lock. Keep 30 small records in RAM, newest first.
     {
         printf '%s|%s|%s|%s' "$(date +%s)" "$1" "$method" "$DELIVER_RESULT"
@@ -236,7 +285,7 @@ add_history() {
             number "$_when" && [ ${#_when} -le 11 ] || continue
             case "$_kind" in sms|power|test) ;; *) continue ;; esac
             case "$_method" in webhook|dingtalk|smtp|sms) ;; *) continue ;; esac
-            case "$_result" in sent|disabled|self_forward_blocked|message_too_long|storage_failed|source_unavailable|power_unavailable|invalid_config|invalid_forward_config|invalid_destination|delivery_failed|smtp_auth_failed) ;; *) continue ;; esac
+            case "$_result" in sent|disabled|self_forward_blocked|message_too_long|storage_failed|source_unavailable|power_unavailable|invalid_config|invalid_forward_config|invalid_destination|delivery_failed|smtp_auth_failed|service_rejected|service_answer_missing) ;; *) continue ;; esac
             [ -z "$_extra" ] || continue
             case "$_slot" in ''|0|1) ;; *) continue ;; esac
             case "$_http" in ''|0|[1-5][0-9][0-9]) ;; *) continue ;; esac
@@ -340,6 +389,7 @@ set_config() {
     json_get_var new_webhook_body webhook_body ''
     json_get_var new_webhook_headers webhook_headers ''
     json_get_var new_webhook_timeout webhook_timeout 12
+    json_get_var new_webhook_expect webhook_expect '__keep__'
     json_get_var new_enabled enabled
     json_get_var new_method method
     json_get_var new_template_language template_language
@@ -368,6 +418,7 @@ set_config() {
     webhook_url=${new_webhook_url:-}; dingtalk_webhook=${new_dingtalk_webhook:-}
     webhook_method=$new_webhook_method webhook_content_type=$new_webhook_content_type
     webhook_body=$new_webhook_body webhook_headers=$new_webhook_headers webhook_timeout=$new_webhook_timeout
+    [ "$new_webhook_expect" = __keep__ ] || webhook_expect=$new_webhook_expect
     sms_to_phone=${new_sms_to_phone:-}; smtp_host=${new_smtp_host:-}
     smtp_port=${new_smtp_port:-465}; smtp_username=${new_smtp_username:-}; smtp_to=${new_smtp_to:-}
     power_forward_enabled=${new_power_forward_enabled:-0}
@@ -390,6 +441,7 @@ set_config() {
     case "$method" in webhook|dingtalk|smtp|sms) ;; *) reply_error invalid_config; return ;; esac
     case "$template_language" in zh|en|tr) ;; *) reply_error invalid_config; return ;; esac
     [ -z "$webhook_url" ] || https_url "$webhook_url" || { reply_error invalid_destination; return; }
+    answer_rule_valid "$webhook_expect" || { reply_error invalid_forward_config; return; }
     number "$webhook_timeout" && [ "$webhook_timeout" -ge 1 ] && [ "$webhook_timeout" -le 120 ] &&
         render_webhook >/dev/null || { reply_error invalid_forward_config; return; }
     [ -z "$dingtalk_webhook" ] || {
@@ -669,8 +721,8 @@ EOF_TARGET
         HTTP_CODE=$(curl "$@" "$_url" 2>/dev/null)
         _rc=$?
         case "$HTTP_CODE" in 2[0-9][0-9]) ;; *) _rc=1 ;; esac
-        if [ "$_rc" -eq 0 ] && [ "$method" = dingtalk ]; then
-            [ "$(jsonfilter -i "$_tmp.reply" -e '@.errcode' 2>/dev/null)" = 0 ] || _rc=1
+        if [ "$_rc" -eq 0 ]; then
+            answer_check "$_tmp.reply" || _rc=1
         fi
         rm -f "$_tmp.body" "$_tmp.reply" "$_tmp.headers"
     fi
@@ -756,6 +808,7 @@ start_test() {
     [ "$enabled" = 1 ] || { reply_error disabled; return; }
     exec 8> "$BASE/state.lock"
     flock -n 8 || { reply_error forward_busy; return; }
+    test_gate || { reply_error forward_test_wait; return; }
     # The child inherits the admission lock; repeated clicks cannot enqueue
     # an unbounded group of workers or occupy an RPC for a slow HTTP timeout.
     setsid "$0" test-run "$profile" locked </dev/null >/dev/null 2>&1 &
@@ -785,6 +838,7 @@ case "${1:-}" in
     set) set_config ;;
     test-run) test_send "${2:-shared}" "${3:-}" ;;
     test-start) start_test "${2:-shared}" ;;
+    log-clear) clear_history ;;
     run) run_daemon ;;
     *) echo 'usage: sms-forward {get|status|set|test-run|run}' >&2; exit 2 ;;
 esac

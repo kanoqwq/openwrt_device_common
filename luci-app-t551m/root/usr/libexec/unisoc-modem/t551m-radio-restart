@@ -1,19 +1,43 @@
 #!/bin/sh
 # Let the platform owner sequence its power state instead of MU300's SFUN dance.
 set -eu
+settings=0
+case "${1:-}" in --settings) settings=1;; '') ;; *) exit 2;; esac
+at=${MU300_AT:-/usr/libexec/unisoc-modem/at}
 selected=${MU300_SIM_SLOT:-}
 if [ -n "$selected" ]; then
     case "$selected" in 0|1) ;; *) exit 2 ;; esac
-    own=$(cat /sys/module/sipc_wwan/parameters/card)
+    own=$(cat "${UNISOC_CARD_FILE:-/sys/module/sipc_wwan/parameters/card}")
     if [ "$selected" != "$own" ]; then
         # Only re-register the addressed standby radio; WAN and MM stay up.
-        /usr/libexec/unisoc-modem/at -t 15 'AT+CFUN=4' | grep -q '^OK'
-        /usr/libexec/unisoc-modem/at -t 15 'AT+CFUN=1' | grep -q '^OK'
+        if [ "$settings" = 1 ]; then
+            status=$("$at" -t 5 'AT+CFUN?')
+            cfun=$(printf '%s\n' "$status" | sed -n 's/^+CFUN: *\([0-9]*\).*$/\1/p')
+            case "$cfun" in
+                1) ;;
+                0|4) echo "RECONNECT-DEFERRED radio-off"; exit 0;;
+                *) echo 'Cannot read standby radio state' >&2; exit 1;;
+            esac
+        fi
+        "$at" -t 15 'AT+CFUN=4' | grep -q '^OK'
+        "$at" -t 15 'AT+CFUN=1' | grep -q '^OK'
         exit 0
     fi
 fi
+if [ "$settings" = 1 ]; then
+    status=$(mmcli -m any --timeout=5 -K)
+    state=$(printf '%s\n' "$status" | awk '$1 == "modem.generic.state" { print $3 }')
+    case "$state" in
+        failed|unknown|initializing|locked|disabled|disabling|enabling)
+            echo "RECONNECT-DEFERRED $state"; exit 0;;
+        enabled|searching|registered|disconnecting|connecting|connected) ;;
+        *) echo 'Cannot read modem state before reconnect' >&2; exit 1;;
+    esac
+fi
 iface=$(uci -q get unisoc_modem.main.data_interface) || iface=wan
+# Restore the netifd interface even if MM rejects a transition (e.g. SIM removal).
+# Otherwise a failed disable leaves WAN administratively down indefinitely.
+trap 'ifup "$iface"' EXIT
 ifdown "$iface"
 mmcli -m any --timeout=30 --disable
 mmcli -m any --timeout=30 --enable
-ifup "$iface"

@@ -52,8 +52,10 @@ def patch_wifi_capabilities(root):
         return
     replacements = [
         ('wiphy_info, wiphy_band\n', 'wiphy_info, wiphy_band, log\n'),
-        ("\tphy_features.cipher_gcmp256 = WLAN_CIPHER_SUITE_GCMP_256 in (phy.cipher_suites ?? []);",
-         "\tphy_features.cipher_gcmp256 = WLAN_CIPHER_SUITE_GCMP_256 in (phy.cipher_suites ?? []);\n"
+        # New wifi-scripts moved cipher flags to ap.uc. Collect DFS capability
+        # beside the shared phy/band lookup, which exists in both generators.
+        ("\tlet band = wiphy_band(phy, config.band);",
+         "\tlet band = wiphy_band(phy, config.band);\n"
          "\tphy_features.radar_detect = length(filter(phy.interface_combinations ?? [], (c) => c.radar_detect_widths)) > 0;\n"
          "\tphy_capabilities.freqs = band?.freqs ?? [];"),
         ('function generate(config) {', NO_DFS + 'function generate(config) {'),
