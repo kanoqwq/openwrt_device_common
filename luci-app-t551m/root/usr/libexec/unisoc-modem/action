@@ -80,6 +80,22 @@ case "${1:-}:${2:-}" in
         sleep 3   # the reply has to make it out first
         reboot
         ;;
+    os:linux-default)
+        if [ ! -x /opt/e5/e5-next-boot ]; then
+            fail "os linux-default" "启动控制不可用"
+        elif out=$(/opt/e5/e5-next-boot linux 2>&1); then
+            ok "os linux-default"
+        else
+            case "$out" in
+                *"rollback failed"*) message='启动控制回退失败，请检查启动设置' ;;
+                *"boot control busy"*) message='启动控制正忙，请稍后重试' ;;
+                *"invalid boot control block size"*) message='启动控制信息无效' ;;
+                *"misc verify failed"*) message='启动控制回读校验失败' ;;
+                *) message='默认启动设置失败，请重试' ;;
+            esac
+            fail "os linux-default" "$message"
+        fi
+        ;;
     os:android)
         # arm inline (fast, failures surface to the page); reboot DETACHED so
         # the reply reaches the browser before the box goes down - a reboot

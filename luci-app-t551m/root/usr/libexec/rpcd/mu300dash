@@ -246,7 +246,7 @@ m_lock_set() {
     kind=$(inp '@.kind')
     val=$(inp '@.val')
     case "$kind" in
-        mode|gran|endc|lte|nr|cell|auto_apply|bands_default) ;;
+        mode|gran|endc|lte|nr|cell|volte|vonr|auto_apply|bands_default) ;;
         *) printf '{"ok":0,"error":"unknown lock kind"}\n'; return ;;
     esac
     "$DASH/lock" start "$kind" "$val"
@@ -300,6 +300,7 @@ do_list() {
 	"forward_status": { "profile": "String" },
 	"forward_set": { "payload": "String" },
 	"forward_test": { "profile": "String" },
+	"forward_log_clear": { },
 	"traffic_get": { "slot": "String" },
 	"traffic_set": { "payload": "String", "slot": "String" },
 	"traffic_clear": { "slot": "String", "confirm": false },
@@ -367,6 +368,7 @@ call)
         sms_delete) run_m sms_delete 'm_sms_delete' ;;
         sms_sync)   run_m sms_sync   'm_sms_sync' ;;
         forward_get) "$DASH/sms-forward" get "$(inp '@.profile' shared)" ;;
+        forward_log_clear) "$DASH/sms-forward" log-clear ;;
         forward_status) "$DASH/sms-forward" status "$(inp '@.profile' shared)" ;;
         forward_set) payload=$(inp '@.payload'); printf '%s' "$payload" | "$DASH/sms-forward" set ;;
         forward_test) "$DASH/sms-forward" test-start "$(inp '@.profile' shared)" ;;
@@ -374,12 +376,16 @@ call)
             ubus -t 3 call unisoc.traffic get "{\"slot\":\"$selected\"}" 2>/dev/null || printf '{"error":"traffic_unavailable"}\n'
             ;;
         traffic_set)
-            ubus -t 5 call unisoc.traffic set "$INPUT" 2>/dev/null || printf '{"ok":0,"error":"traffic_unavailable"}\n'
+            # rpcd adds ubus_rpc_session for the public object's ACL check.
+            # The private service must receive only its declared arguments.
+            params=$(printf '%s' "$INPUT" | ucode -e 'import * as fs from "fs"; let i=json(fs.readfile("/dev/stdin")); print(sprintf("%J", {payload:i.payload,slot:getenv("MU300_SIM_SLOT")}));' 2>/dev/null) || { printf '{"ok":0,"error":"invalid_config"}\n'; exit 0; }
+            ubus -t 5 call unisoc.traffic set "$params" 2>/dev/null || printf '{"ok":0,"error":"traffic_unavailable"}\n'
             ;;
         traffic_clear)
             # Preserve the explicit scope and boolean confirmation. The daemon
             # rejects absent/invalid scopes instead of resolving the active SIM.
-            ubus -t 5 call unisoc.traffic clear "$INPUT" 2>/dev/null || printf '{"ok":0,"error":"traffic_unavailable"}\n'
+            params=$(printf '%s' "$INPUT" | ucode -e 'import * as fs from "fs"; let i=json(fs.readfile("/dev/stdin")); print(sprintf("%J", {confirm:i.confirm === true,slot:i.slot}));' 2>/dev/null) || { printf '{"ok":0,"error":"invalid_config"}\n'; exit 0; }
+            ubus -t 5 call unisoc.traffic clear "$params" 2>/dev/null || printf '{"ok":0,"error":"traffic_unavailable"}\n'
             ;;
         usb_get)    run_m usb_get    '"$DASH/device-usb" get' ;;
         usb_set)

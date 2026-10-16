@@ -14,6 +14,7 @@ new Function(common);new Function(locks);new Function(fs.readFileSync(base+'view
     for (slot of ['0','1']) {
         await scoped.callStatus();await scoped.callCells();await scoped.callSignal();await scoped.callAt('AT+COPS?');
         await scoped.callLockGet();await scoped.callLockFresh(true);await scoped.callLockSet('lte','1,3');
+        for(const kind of ['ims','volte','vonr'])await scoped.callLockSet(kind,'off');
         await scoped.callLockStatus('job');await scoped.callTrafficGet();await scoped.callTrafficSet('{}');
         for (const request of sent.splice(0)) {
             assert.equal(request.params.at(-1),'slot');assert.equal(request.args.at(-1),slot);
@@ -35,9 +36,9 @@ new Function(common);new Function(locks);new Function(fs.readFileSync(base+'view
     clearBusy({classList:{contains:()=>false,remove:()=>{}},querySelectorAll:()=>[{remove:()=>removed++}]},false);
     assert.equal(removed,1,'paint() removed the busy class, but spinner still needs removal');
     let messages=[], cleared=0;
-    const M={waitLockJob:async()=>{throw new Error('No AT response')},busy:()=>cleared++};
+    const M={translate:x=>x,waitLockJob:async()=>{throw new Error('No AT response')},busy:()=>cleared++};
     const view=new Function('view','M',locks+';')({extend:x=>x},M);
-    const instance={...view,note:(text,type)=>messages.push({text,type}),refresh:()=>{},_applying:true};
+    const instance={...view,Q:()=>null,note:(text,type)=>messages.push({text,type}),refresh:()=>{},_applying:true};
     await instance.readback({ok:1,id:'job'},{});
     assert.equal(cleared,1);assert.equal(instance._applying,false);
     assert(messages.some(m=>m.type==='error'&&m.text.includes('No AT response')));
@@ -50,6 +51,7 @@ new Function(common);new Function(locks);new Function(fs.readFileSync(base+'view
     const bands={...view,Q:id=>nodes[id],lockCand:{nr:[78],lte:[]},lockSel:{nr:{78:true},lte:{}},
         chipRow:(box,rat,cand)=>{box.children=cand.map(b=>({getAttribute:()=>String(b)}));},
         lastLock:{caps:{nr:'1,3',lte:'1,3,8'},nr:{locked:'1,78'},lte:{locked:''}}};
+    bands.loading=()=>{};
     bands.paint();
     assert.deepEqual(bands.lockCand.nr,[1,3]);assert(!bands.lockSel.nr[78]);
     assert(nodes['lock-nrline'].textContent.includes('已锁'), 'Equal counts do not mean equal bands');
@@ -57,6 +59,19 @@ new Function(common);new Function(locks);new Function(fs.readFileSync(base+'view
     assert.deepEqual(bands.lockCand.nr,[]);assert.deepEqual(bands.lockSel.nr,{});
     assert.equal(nodes['lock-nr'].children.length,0);
     assert(nodes['lock-nrline'].textContent.includes('暂不可用'));
+    const switches=['ims','volte','vonr'].flatMap(kind=>['on','off'].map(value=>({
+        dataset:{voice:kind,enabled:value},setAttribute(k,v){this[k]=v;}
+    })));
+    bands._root={querySelectorAll:selector=>switches.filter(b=>selector.includes('"'+b.dataset.voice+'"'))};
+    for(const kind of ['ims','volte','vonr'])nodes['lock-'+kind+'-state']={};
+    bands.lastLock.ims={enabled:false,source:'acknowledged'};
+    bands.lastLock.volte={enabled:true,source:'modem'};
+    bands.lastLock.vonr={enabled:null,source:'unknown'};
+    bands.paint();
+    assert.equal(switches.find(b=>b.dataset.voice==='volte'&&b.dataset.enabled==='on')['aria-checked'],'true');
+    assert.equal(switches.find(b=>b.dataset.voice==='volte'&&b.dataset.enabled==='on').disabled,false);
+    assert(switches.filter(b=>b.dataset.voice==='vonr').every(b=>b.disabled&&b['aria-checked']==='false'));
+    console.log('PASS: VoLTE readback, disabled unknown VoNR and separate SIM RPC');
     console.log('PASS: job success/error, clock-independent completion, spinner cleanup, failed and successful readback');
     console.log('PASS: dynamic candidates, stale selection cleanup, unavailable capabilities and set comparison');
     // Hold the neighboring-cell RPC while live serving data arrives. Each

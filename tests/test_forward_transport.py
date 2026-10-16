@@ -29,6 +29,7 @@ def main():
                  MU300_FORWARD_RUNTIME=str(root),MU300_FORWARD_BATTERY=str(battery),
                  MU300_FORWARD_POLL='1',E5_SMS_DATA=str(root),
                  MU300_FORWARD_RENDERER=str(tools/'forward-template.uc'),
+                 MU300_FORWARD_ANSWER=str(tools/'forward-answer.uc'),
                  E5_FORWARD_NATIVE=str(bindir/'native'),TEST_LOG=str(log),
                  TEST_NATIVE=str(tools/'forward-native'))
         def script(name,code):

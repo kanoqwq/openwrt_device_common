@@ -7,6 +7,7 @@
  * status poll never includes a URL, phone number, password or SMS body. */
 var METHODS = { webhook: 'Webhook', dingtalk: '钉钉机器人', smtp: '邮件 SMTP', sms: '本机短信' };
 var RESULTS = {
+	service_rejected: '服务返回失败结果', service_answer_missing: '服务响应无法确认成功',
 	idle: '暂无投递', sent: '发送成功', disabled: '转发未开启',
 	self_forward_blocked: '已拦截向原发件人转发',
 	message_too_long: '短信过长，未发送', storage_failed: '设备保存失败',
@@ -16,6 +17,7 @@ var RESULTS = {
 	smtp_auth_failed: '邮箱服务器拒绝登录，请检查授权码'
 };
 var ERRORS = {
+	forward_test_wait: '请等待 5 秒后再测试',
 	forward_busy: '转发正在执行，请稍后再试', disabled: '转发未开启',
 	invalid_config: '配置无效', invalid_forward_config: '配置无效',
 	invalid_destination: '目标地址无效', forward_storage_failed: '设备保存失败',
@@ -110,6 +112,8 @@ return view.extend({
    <div class="mud-fwd-field"><label for="mud-fwd-webhook_body">正文模板</label><textarea rows="6" id="mud-fwd-webhook_body" spellcheck="false"></textarea></div>
    <div class="mud-note">占位符：{from}、{text}、{time}、{sim}、{device}、{kind}。JSON 占位符放在字符串内；按格式自动转义，绝不执行命令。</div>
    <div class="mud-note">GET 只发送 URL 参数；JSON 模板留空时沿用旧版 from/text/date 格式。仅支持公网 HTTPS，验证证书且不跟随重定向。</div>
+   <div class="mud-fwd-field"><label for="mud-fwd-webhook_expect">成功响应条件（可选）</label><input id="mud-fwd-webhook_expect" maxlength="128" placeholder="errcode=0"></div>
+   <div class="mud-note">留空时任意 HTTP 2xx 为成功；填写 errcode=0 或 ok=true 时，还需响应 JSON 顶层字段匹配。</div>
    <div class="mud-fwd-field"><label for="mud-fwd-webhook_headers">附加请求头（每行 Name: value）</label><textarea rows="3" id="mud-fwd-webhook_headers" autocomplete="off" spellcheck="false"></textarea></div>
   </div>
   <div class="mud-fwd-channel" data-method="dingtalk">
@@ -160,6 +164,7 @@ return view.extend({
   <button class="mud-btn on" id="mud-fwd-save">保存设置</button>
   <button class="mud-btn" id="mud-fwd-test">发送测试消息</button>
   <button class="mud-btn" id="mud-fwd-refresh">刷新状态</button>
+  <button class="mud-btn" id="mud-fwd-clear">清空投递记录</button>
  </div>
 </section>`;
 		M.localize(root);
@@ -202,6 +207,7 @@ return view.extend({
 		this.q('webhook_method').value = c.webhook_method || 'POST';
 		this.q('webhook_content_type').value = c.webhook_content_type || 'application/json';
 		this.q('webhook_timeout').value = c.webhook_timeout || 12;
+		this.q('webhook_expect').value = c.webhook_expect || '';
 		this.q('webhook_body').value = c.webhook_body || '';
 		this.q('webhook_headers').value = c.webhook_headers || '';
 		this.q('preset').value = '';
@@ -221,7 +227,7 @@ return view.extend({
 			'smtp_host', 'smtp_port', 'smtp_username', 'smtp_to', 'smtp_password',
 			'blacklist_phone', 'blacklist_keywords', 'nickname' ].forEach(function(k) { p[k] = self.q(k).value.trim(); });
 		[ 'sms_to_phone', 'blacklist_phone', 'blacklist_keywords' ].forEach(function(k) { p[k] = lines(p[k]).join('\n'); });
-		[ 'webhook_method', 'webhook_content_type', 'webhook_timeout', 'webhook_headers', 'webhook_body' ].forEach(function(k) { p[k] = self.q(k).value; });
+		[ 'webhook_method', 'webhook_content_type', 'webhook_timeout', 'webhook_headers', 'webhook_body', 'webhook_expect' ].forEach(function(k) { p[k] = self.q(k).value; });
 		if (p.clear_smtp_password) {
 			p.smtp_host = ''; p.smtp_username = ''; p.smtp_to = ''; p.smtp_password = ''; p.smtp_port = '465';
 		}
@@ -233,6 +239,7 @@ return view.extend({
 			if (words.length > 32 || words.some(function(w) { return unescape(encodeURIComponent(w)).length > 128; }) ||
 			new Set(words).size !== words.length) return '关键词无效、重复或超过数量上限';
 		if (p.power_forward_enabled && !this.status.power_supported) return '设备暂未提供有效电池状态';
+		if (p.webhook_expect && !/^[A-Za-z_][A-Za-z0-9_]{0,63}=(-?[0-9]{1,16}|[a-z]{1,16})$/.test(p.webhook_expect)) return '成功响应条件格式无效';
 		if (!/^\d+$/.test(p.webhook_timeout) || +p.webhook_timeout < 1 || +p.webhook_timeout > 120) return '请求超时必须为 1–120 秒';
 		if (p.webhook_body && p.webhook_content_type === 'application/json') {
 			try { JSON.parse(p.webhook_body); } catch (e) { return '正文模板必须是有效 JSON'; }
@@ -283,16 +290,27 @@ return view.extend({
 	unload: function() { poll.remove(this._refresh); },
 	wire: function() {
 		var self = this;
+		this.q('clear').onclick = function() {
+            M.confirmBox('清空投递记录？', '只清除最近投递记录，不影响短信、转发配置或已处理状态。', { okText: '确定' }).then(function(yes) {
+                if (!yes) return;
+                self.q('clear').disabled = true;
+                M.callForwardClear().then(function(r) {
+                    if (!r.ok) { self.error(r.error || '设备保存失败'); return; }
+                    self.error(''); return self.refreshStatus();
+                }).catch(function() { self.error('读取失败，请刷新页面'); }).finally(function() { self.q('clear').disabled = false; });
+            });
+        };
 		this.q('mode').onchange = function() { self.paintMethod(); };
 		this.q('webhook_method').onchange = function() { self.paintMethod(); };
 		this.q('preset').onchange = function() {
-			var p = preset(this.value); if (!p) return;
+			var name = this.value, p = preset(name); if (!p) return;
 			M.confirmBox('填入推送预设？', '将替换当前 Webhook 地址、正文及请求头，保存后才会生效。', { okText: '确定' }).then(function(yes) {
 				if (!yes) return;
 				self.q('webhook_url').value = p[0];
 				self.q('webhook_method').value = 'POST';
 				self.q('webhook_content_type').value = typeof p[1] === 'string' ? 'application/x-www-form-urlencoded' : 'application/json';
 				self.q('webhook_body').value = typeof p[1] === 'string' ? p[1] : JSON.stringify(p[1], null, 2);
+				self.q('webhook_expect').value = ({bark:'code=200',pushplus:'code=200',serverchan:'code=0',telegram:'ok=true',wecom:'errcode=0',dingtalk:'errcode=0'})[name] || '';
 				self.q('webhook_headers').value = ''; self.paintMethod();
 			});
 		};

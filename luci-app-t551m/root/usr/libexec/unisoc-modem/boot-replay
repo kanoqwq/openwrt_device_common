@@ -16,7 +16,7 @@ for dir in "$state" "$state/sim0" "$state/sim1"; do
     [ "$dir" != "$state" ] || [ ! -f "$state/.per-sim-migrated" ] || continue
     [ "$(cat "$dir/auto_apply" 2>/dev/null)" != off ] || continue
     # Empty band/cell files explicitly request unlock and must also replay.
-    for k in endc mode lte nr cell; do [ -f "$dir/$k" ] && have=1; done
+    for k in volte vonr endc mode lte nr cell; do [ -f "$dir/$k" ] && have=1; done
 done
 [ "$have" = 1 ] || exit 0
 
