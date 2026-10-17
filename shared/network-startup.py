@@ -68,30 +68,138 @@ def patch_wifi_capabilities(root):
     path.write_text(text)
 
 
-CONNECT_RETRY = '''# unisoc-pdp-connect-retry: bounded recovery without disabling the radio.
-modemmanager_connect_retry() {
-	local device="$1" connectargs="$2" attempt=1 result rc delay
-	while :; do
-		result=$(mmcli --modem="${device}" --timeout 120 --simple-connect="${connectargs}" 2>&1)
-		rc=$?
-		printf '%s\\n' "$result"
-		[ "$rc" -eq 0 ] && return 0
-		# Observed after Android -> OpenWrt: context activation error 28 can
-		# clear on a later attempt. Do not retry SIM/auth/other errors here.
-		[ "$device" = unisoc-sipc ] && [ "$attempt" -lt 3 ] || return "$rc"
-		case "$result" in
-			*"Couldn't activate PDP context "*"Unknown mobile equipment error: 28'"*) ;;
-			*) return "$rc" ;;
+CONNECT_RETRY = r'''# unisoc-pdp-connect-retry: setup-owned recovery without disabling the radio.
+# unisoc-ps-registration-recovery: leave offline recovery to registration events.
+modemmanager_unisoc_wait_for_ps() {
+	[ "$1" = unisoc-sipc ] || return 1
+	case "$2" in
+		*Error.MobileEquipment.NetworkTimeout:*|*Error.MobileEquipment.NoNetwork:*|\
+		*Error.Connection.NoCarrier:*|*Error.Core.Timeout:*|*Error.Core.Retry:*|\
+		*Error.Core.WrongState:*|*Error.Core.Cancelled:*) ;;
+		*) return 1 ;;
+	esac
+	local status state packet
+	status=$(mmcli --modem="$1" --output-keyvalue 2>/dev/null) || return 1
+	state=$(modemmanager_get_field "$status" modem.generic.state)
+	packet=$(modemmanager_get_field "$status" modem.3gpp.packet-service-state)
+	case "$state:$packet" in
+		searching:*|enabled:detached|registered:detached) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+modemmanager_unisoc_block_restart() {
+	if [ "$2" = unisoc-sipc ] && [ "${MODEMMANAGER_UNISOC_WAIT_PS:-0}" = 1 ]; then
+		# Unlike block_restart, availability preserves the user's autostart
+		# intent. The PS event subscriber makes it available after reattach.
+		proto_set_available "$1" 0
+	else
+		proto_block_restart "$1"
+	fi
+}
+
+modemmanager_unisoc_retryable() {
+	case "$1" in
+		*Error.Core.Cancelled:*|*Error.Core.WrongState:*)
+			# Losing registration can cancel the bearer inside MM while the
+			# setup request is still wanted. A user ifdown terminates this
+			# shell through the TERM trap instead; do not revive a disabled
+			# modem or turn a missing status into permission to reconnect.
+			local status state
+			status=$(mmcli --modem="$2" --output-keyvalue 2>/dev/null) || return 1
+			state=$(modemmanager_get_field "$status" modem.generic.state)
+			case "$state" in
+				enabling|connecting|disconnecting) return 0 ;;
+				enabled|searching|registered|connected)
+					case "$1" in *Error.Core.Cancelled:*) return 0 ;; esac ;;
+			esac
+			return 1 ;;
+		*Error.MobileEquipment.Sim*|*Error.MobileEquipment.IncorrectPassword:*|\
+		*Error.MobileEquipment.NetworkNotAllowed:*|*Error.MobileEquipment.GprsAuthenticationFailure:*|\
+		*Error.Core.InvalidArgs:*|*Error.Core.Unsupported:*) return 1 ;;
+		*Error.MobileEquipment.NetworkTimeout:*|*Error.MobileEquipment.NoNetwork:*|\
+		*Error.Connection.NoCarrier:*|*Error.Core.Timeout:*|*Error.Serial.ResponseTimeout:*|\
+		*Error.Core.Retry:*|*Error.Core.InProgress:*|*"No IPv4 settings for PDP context "*) return 0 ;;
+		*"Couldn't activate PDP context "*"Unknown mobile equipment error: 28'"*) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+modemmanager_unisoc_retry() {
+	local device="$1" operation="$2" argument="$3"
+	local attempt=1 delay=1 result rc output retry_child saved_traps
+	MODEMMANAGER_UNISOC_WAIT_PS=0
+	# Leave other modem plugins on their original single-attempt behavior.
+	if [ "$device" != unisoc-sipc ]; then
+		case "$operation" in
+			connect) mmcli --modem="$device" --timeout 120 --simple-connect="$argument" ;;
+			register) mmcli --modem="$device" --timeout 120 --3gpp-register-in-operator="$argument" ;;
+			*) return 2 ;;
 		esac
-		delay=$((attempt * 5))
-		echo "PDP activation error 28; retrying in ${delay}s (${attempt}/2)"
-		sleep "$delay"
+		return $?
+	fi
+	output=$(mktemp /tmp/mm-unisoc-start.XXXXXX) || return 1
+	saved_traps=$(trap)
+	# netifd cancels setup with SIGTERM on ifdown/reload. Background children
+	# plus an interruptible wait allow us to stop mmcli/sleep before exiting.
+	trap '[ -z "$retry_child" ] || { kill "$retry_child" 2>/dev/null; wait "$retry_child" 2>/dev/null; }; rm -f "$output"; exit 143' TERM INT
+	while :; do
+		case "$operation" in
+			connect) mmcli --modem="$device" --timeout 120 --simple-connect="$argument" >"$output" 2>&1 & ;;
+			register) mmcli --modem="$device" --timeout 120 --3gpp-register-in-operator="$argument" >"$output" 2>&1 & ;;
+			*) rc=2; break ;;
+		esac
+		retry_child=$!
+		wait "$retry_child"; rc=$?
+		retry_child=
+		result=$(cat "$output")
+		printf '%s\n' "$result"
+		[ "$rc" -eq 0 ] && break
+		if modemmanager_unisoc_wait_for_ps "$device" "$result"; then
+			MODEMMANAGER_UNISOC_WAIT_PS=1
+			echo 'Packet service unavailable; waiting for registration event'
+			break
+		fi
+		modemmanager_unisoc_retryable "$result" "$device" || break
+		echo "Unisoc $operation temporarily unavailable; retrying in ${delay}s (attempt $attempt)"
+		sleep "$delay" & retry_child=$!
+		wait "$retry_child"
+		retry_child=
 		attempt=$((attempt + 1))
+		# Repeat the user-selected transient retry cadence without a cap.
+		# Registration loss above still waits for the existing PS events.
+		case "$delay" in
+			1|3|5) delay=$((delay + 2)) ;;
+			*) delay=1 ;;
+		esac
 	done
+	rm -f "$output"
+	trap - TERM INT
+	# trap output is generated by this shell, never modem data or configuration.
+	[ -z "$saved_traps" ] || eval "$saved_traps"
+	return "$rc"
+}
+
+modemmanager_connect_retry() {
+	modemmanager_unisoc_retry "$1" connect "$2"
+}
+
+modemmanager_register_retry() {
+	modemmanager_unisoc_retry "$1" register "$2"
 }
 
 '''
 
+# Resolve private profile credentials into local netifd variables only. Do not
+# eval JSON, rewrite global UCI during a SIM switch, or log usernames/passwords.
+RADIO_POLICY = '''\t# unisoc-user-radio-policy: wait without retrying an explicitly disabled SIM.
+\tif [ "$device" = unisoc-sipc ] && [ -e /etc/e5/sim-radio ] &&
+\t   ! /usr/libexec/unisoc-modem/radio-allowed "$(cat /sys/module/sipc_wwan/parameters/card)"; then
+\t\tproto_notify_error "$interface" SIM_RADIO_DISABLED
+\t\tproto_set_available "$interface" 0
+\t\treturn 1
+\tfi
+'''
 
 APN_SELECTION = '''\t# unisoc-apn-selection: shared by E5, T551M and M8 on every dial.
 \tif [ "$device" = unisoc-sipc ] && [ -x /usr/libexec/unisoc-modem/apn ]; then
@@ -118,6 +226,19 @@ APN_SELECTION = '''\t# unisoc-apn-selection: shared by E5, T551M and M8 on every
 
 
 def patch_root(root, profile='t551m'):
+    for asset in ('usr/libexec/e5-network-recovery', 'etc/init.d/e5-network-recovery'):
+        source = Path(__file__).resolve().parents[1] / 'overlay' / asset
+        target = root / asset
+        if source.is_file():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(source.read_bytes().replace(b'\r\n', b'\n'))
+            target.chmod(0o755)
+    if (root / 'etc/init.d/e5-network-recovery').exists():
+        for link in ('S96', 'K10'):
+            target = root / ('etc/rc.d/' + link + 'e5-network-recovery')
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if not target.is_symlink():
+                target.symlink_to('../init.d/e5-network-recovery')
     discovery = root / 'usr/libexec/e5-mm-report-ports'
     discovery.parent.mkdir(parents=True, exist_ok=True)
     source = Path(__file__).resolve().parents[1] / 'overlay/usr/libexec/e5-mm-report-ports'
@@ -128,6 +249,14 @@ def patch_root(root, profile='t551m'):
         # The helper is installed by the common overlay before these run.
         raise ValueError('Missing shared SIPC port discovery helper')
     discovery.chmod(0o755)
+    # The APK update path must replace the old CID-1-only hotplug handler too.
+    hotplug = Path('etc/hotplug.d/wwan/26-e5-sipa-eth')
+    source = Path(__file__).resolve().parents[1] / 'overlay' / hotplug
+    if source.is_file():
+        target = root / hotplug
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(source.read_bytes().replace(b'\r\n', b'\n'))
+        target.chmod(0o755)
     patch_wifi_capabilities(root)
     config = root / 'etc/config/unisoc_modem'
     defaults = root / 'etc/e5/radio-defaults.json'
@@ -192,6 +321,22 @@ def patch_root(root, profile='t551m'):
     proto = root / 'lib/netifd/proto/modemmanager.sh'
     if proto.exists():
         text = proto.read_text()
+        if '# unisoc-data-rf-independent:' not in text:
+            old = '\tlocal disable="$(uci_get network "$interface" disable_modem "1")"'
+            new = '''\t# unisoc-data-rf-independent: Android data-off leaves RF for calls/SMS.
+\tlocal disable_default=1
+\t[ "$device" != unisoc-sipc ] || disable_default=0
+\tlocal disable="$(uci_get network "$interface" disable_modem "$disable_default")"'''
+            if text.count(old) != 1:
+                raise ValueError('Unexpected ModemManager data teardown location')
+            text = text.replace(old, new)
+            proto.write_text(text)
+        if '# unisoc-user-radio-policy:' not in text:
+            anchor = '\t# always cleanup before attempting a new connection, just in case\n'
+            if text.count(anchor) != 1:
+                raise ValueError('Unexpected ModemManager RF policy hook location')
+            text = text.replace(anchor, RADIO_POLICY + anchor)
+            proto.write_text(text)
         if '# unisoc-apn-selection:' not in text:
             anchor = '\t# set initial eps bearer settings\n'
             if text.count(anchor) != 1:
@@ -219,14 +364,60 @@ def patch_root(root, profile='t551m'):
 ''')
             proto.write_text(text)
 
-        if '# unisoc-pdp-connect-retry:' not in text:
-            anchor = 'proto_modemmanager_setup() {'
-            call = '\tmmcli --modem="${device}" --timeout 120 --simple-connect="${connectargs}" || {'
+        retry_marker = '# unisoc-pdp-connect-retry:'
+        anchor = 'proto_modemmanager_setup() {'
+        call = '\tmmcli --modem="${device}" --timeout 120 --simple-connect="${connectargs}" || {'
+        if retry_marker in text:
+            start = text.index(retry_marker)
+            end = text.index(anchor, start)
+            text = text[:start] + CONNECT_RETRY + text[end:]
+        else:
             if text.count(anchor) != 1 or text.count(call) != 1:
                 raise ValueError('Unexpected ModemManager connect configuration')
             text = text.replace(anchor, CONNECT_RETRY + anchor)
             text = text.replace(call, '\tmodemmanager_connect_retry "$device" "$connectargs" || {')
-            proto.write_text(text)
+        register = ('\tmmcli --modem="${device}" \\\n'
+                    '\t\t--timeout 120 \\\n'
+                    '\t\t--3gpp-register-in-operator="${plmn}" || {')
+        replacement = '\tmodemmanager_register_retry "$device" "$plmn" || {'
+        if register in text:
+            if text.count(register) != 1:
+                raise ValueError('Unexpected ModemManager registration configuration')
+            text = text.replace(register, replacement)
+        elif text.count(replacement) != 1:
+            raise ValueError('Unexpected ModemManager registration retry hook')
+        # No SIM is an event wait, not a permanent user ifdown. Hot-swap
+        # reprobes the same device and the existing recovery service resumes
+        # it only after genuine registration, preserving autostart intent.
+        missing = '\t\t\tproto_notify_error "${interface}" MM_FAILED_REASON_SIM_MISSING\n'
+        original = missing + '\t\t\tproto_block_restart "${interface}"'
+        replacement = missing + '''\t\t\tif [ "$device" = unisoc-sipc ]; then
+\t\t\t\tproto_set_available "$interface" 0
+\t\t\telse
+\t\t\t\tproto_block_restart "${interface}"
+\t\t\tfi'''
+        # Older staging runs also rewrote the generic else branch below.
+        # Normalize it before validating/updating this shared hook again.
+        text = text.replace(replacement.replace('proto_block_restart "${interface}"',
+                            'modemmanager_unisoc_block_restart "$interface" "$device"'), replacement)
+        if original in text:
+            text = text.replace(original, replacement)
+        elif replacement not in text:
+            raise ValueError('Unexpected ModemManager missing SIM handling')
+        # Only registration/connection failure paths participate. PIN,
+        # credentials, explicit modes and other modem plugins keep their rules.
+        for start_marker, end_marker in (
+                ('modemmanager_set_plmn() {', retry_marker),
+                (anchor, 'proto_modemmanager_teardown() {')):
+            start = text.index(start_marker)
+            end = text.index(end_marker, start)
+            body = text[start:end]
+            body = body.replace(replacement, '# unisoc-missing-sim-guard-placeholder')
+            body = body.replace('proto_block_restart "${interface}"',
+                                'modemmanager_unisoc_block_restart "$interface" "$device"')
+            body = body.replace('# unisoc-missing-sim-guard-placeholder', replacement)
+            text = text[:start] + body + text[end:]
+        proto.write_text(text)
 
     luci = root / 'www/luci-static/resources/protocol/modemmanager.js'
     if luci.exists():

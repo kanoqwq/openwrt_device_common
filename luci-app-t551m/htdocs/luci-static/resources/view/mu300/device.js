@@ -1,6 +1,7 @@
 'use strict';
 'require view';
 'require mu300.common as M';
+'require mu300.charge as Charge';
 
 return view.extend({
 	load: function() { return L.resolveDefault(M.callUsbGet(), {}); },
@@ -62,6 +63,7 @@ return view.extend({
 		this.state = state || {};
 		this.wire();
 		this.paint();
+		Charge.mount(root);
 		return root;
 	},
 	q: function(id) { return this.root.querySelector('#mud-usb-' + id); },

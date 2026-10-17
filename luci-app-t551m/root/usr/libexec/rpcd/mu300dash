@@ -116,17 +116,27 @@ m_status() {
 # Fast, uncached per-card counters. No AT, Wi-Fi enumeration or full sysinfo.
 # Fractional uptime avoids integer-second jitter in subsecond rate deltas.
 m_rates() {
-    local dev=sipa_eth0 stamp rest rx tx idx
+    local dev=sipa_eth0 stamp rest rx=0 tx=0 idx base=0 offset=0 path r t
     [ "$MU300_SIM_SLOT" = 0 ] || dev=sipa_eth8
+    [ "$MU300_SIM_SLOT" = 0 ] || base=8
     IFS=' ' read -r stamp rest < /proc/uptime
     case "$stamp" in ''|*[!0-9.]*) printf '{"error":"Clock unavailable"}\n'; return ;; esac
-    if ! { IFS= read -r rx < "/sys/class/net/$dev/statistics/rx_bytes" &&
-           IFS= read -r tx < "/sys/class/net/$dev/statistics/tx_bytes" &&
-           IFS= read -r idx < "/sys/class/net/$dev/ifindex"; }; then
+    if ! IFS= read -r idx < "/sys/class/net/$dev/ifindex"; then
         printf '{"card":%s,"ts":%s,"device":"%s","net":null}\n' "$MU300_SIM_SLOT" "$stamp" "$dev"
         return
     fi
-    case "$rx:$tx:$idx" in *[!0-9:]*) printf '{"error":"Counters unavailable"}\n'; return ;; esac
+    while [ "$offset" -lt 8 ]; do
+        path=/sys/class/net/sipa_eth$((base + offset))
+        offset=$((offset + 1))
+        [ -d "$path" ] || continue
+        if ! { IFS= read -r r < "$path/statistics/rx_bytes" && IFS= read -r t < "$path/statistics/tx_bytes"; }; then
+            printf '{"card":%s,"ts":%s,"device":"%s","net":null}\n' "$MU300_SIM_SLOT" "$stamp" "$dev"
+            return
+        fi
+        case "$r:$t" in *[!0-9:]*|:*|*:) printf '{"error":"Counters unavailable"}\n'; return ;; esac
+        rx=$((rx + r)); tx=$((tx + t))
+    done
+    case "$idx" in *[!0-9]*) printf '{"error":"Counters unavailable"}\n'; return ;; esac
     [ -n "$rx" ] && [ -n "$tx" ] && [ -n "$idx" ] || { printf '{"error":"Counters unavailable"}\n'; return; }
     printf '{"card":%s,"ts":%s,"device":"%s","ifindex":%s,"net":{"rx":%s,"tx":%s}}\n' \
         "$MU300_SIM_SLOT" "$stamp" "$dev" "$idx" "$rx" "$tx"
@@ -169,10 +179,13 @@ m_act() {
     local op arg
     op=$(inp '@.op')
     arg=$(inp '@.arg')
+    if [ "$op" = modem-reset ] &&
+       ! "$DASH/radio-allowed" "${MU300_SIM_SLOT:-$(cat /sys/module/sipc_wwan/parameters/card)}"; then
+        printf '{"ok":0,"error":"This SIM radio is disabled by the user"}\n'; return
+    fi
     case "$op" in
-        radio)      # the SFUN dance can run half a minute: never inside the request
-            setsid "$DASH/action" radio "$arg" >/dev/null 2>&1 &
-            printf '{"ok":1,"started":1,"op":"radio %s"}\n' "$arg"
+        radio)      # Submission is fast; return the actual shared RF job.
+            case "$arg" in on|off) "$DASH/action" radio "$arg" ;; *) printf '{"ok":0,"error":"Invalid radio request"}\n';; esac
             ;;
         modem-reset|reboot|vpn)
             setsid "$DASH/action" "$op" "$arg" >/dev/null 2>&1 &
@@ -280,6 +293,9 @@ do_list() {
 	"sysinfo": { },
 	"sim_get": { },
 	"sim_set": { "slot": "String", "current": "String", "confirm": false },
+	"sim_radio_set": { "slot": "String", "enabled": false, "confirm": false },
+	"sim_radio_get": { },
+	"sim_radio_status": { "id": "String" },
 	"sim_status": { "id": "String" },
 	"status": { "slot": "String" },
 	"rates": { "slot": "String" },
@@ -342,6 +358,9 @@ call)
             printf '%s' "$payload" | "$DASH/apn" "$action" ;;
         sim_get)    "$DASH/data-sim" get ;;
         sim_set)    printf '%s' "$INPUT" | "$DASH/data-sim" set ;;
+        sim_radio_set) printf '%s' "$INPUT" | "$DASH/data-sim" radio ;;
+        sim_radio_get) "$DASH/data-sim" radio-get ;;
+        sim_radio_status) "$DASH/data-sim" status "$(inp '@.id')" ;;
         sim_status) "$DASH/data-sim" status "$(inp '@.id')" ;;
         status)     run_m status     'm_status' ;;
         rates)      m_rates ;;

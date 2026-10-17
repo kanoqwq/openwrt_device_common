@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-t551m
 PKG_VERSION:=1.1.0
-PKG_RELEASE:=4
+PKG_RELEASE:=8
 PKG_LICENSE:=MIT
 PKG_MAINTAINER:=MU300 Linux contributors
 PKGARCH:=all
@@ -31,6 +31,7 @@ define Package/luci-app-t551m/conffiles
 /etc/e5-cpu-voltage-armed.json
 /etc/unisoc-modem/forward/
 /etc/e5-sounds/
+/etc/e5/sim-radio
 endef
 
 define Build/Compile
@@ -45,6 +46,7 @@ define Package/luci-app-t551m/install
 	chmod 0755 $(1)/etc/init.d/unisoc-sms-forward
 	chmod 0600 $(1)/etc/config/unisoc_apn
 	chmod 0755 $(1)/usr/libexec/rpcd/e5-sounds
+	chmod 0755 $(1)/usr/libexec/rpcd/e5-charge
 	$(INSTALL_DIR) $(1)/usr/lib/lua/luci/i18n
 	$(CP) ./lmo/. $(1)/usr/lib/lua/luci/i18n/
 endef

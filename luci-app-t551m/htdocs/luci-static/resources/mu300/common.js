@@ -654,6 +654,58 @@ const PLATFORM_ERRORS = [
     "Böyle bir ayar yok"
   ]
 ];
+PLATFORM_ERRORS.push(...[
+  [
+    "Enable the target SIM radio before switching",
+    "请先开启目标 SIM 的射频，再切换上网卡",
+    "Geçişten önce hedef SIM radyosunu açın"
+  ],
+  [
+    "This SIM radio is disabled by the user",
+    "该卡射频已被用户禁用",
+    "Bu SIM radyosu kullanıcı tarafından kapatılmış"
+  ],
+  [
+    "Invalid saved SIM radio policy",
+    "已保存的 SIM 射频设置无效",
+    "Kaydedilmiş SIM radyo ayarları geçersiz"
+  ],
+  [
+    "Radio setting saved; modem command failed:",
+    "设置已保存，但基带执行失败：",
+    "Radyo ayarı kaydedildi; modem komutu başarısız:"
+  ],
+  [
+    "Radio setting saved; RF readback not confirmed",
+    "设置已保存，但未能确认射频状态",
+    "Radyo ayarı kaydedildi; modem durumu doğrulanamadı"
+  ],
+  [
+    "Radio setting saved; target SIM is not ready",
+    "设置已保存，目标 SIM 尚未就绪",
+    "Radyo ayarı kaydedildi; hedef SIM henüz hazır değil"
+  ],
+  [
+    "Radio setting saved; RF enable failed",
+    "设置已保存，但射频开启失败",
+    "Radyo ayarı kaydedildi; radyo açılamadı"
+  ],
+  [
+    "Radio setting saved; RF disable failed",
+    "设置已保存，但射频关闭失败",
+    "Radyo ayarı kaydedildi; radyo kapatılamadı"
+  ],
+  [
+    "Radio setting failed",
+    "射频设置失败",
+    "Radyo ayarı başarısız"
+  ],
+  [
+    "Invalid radio request",
+    "射频设置请求无效",
+    "Radyo isteği geçersiz"
+  ]
+]);
 const PLATFORM_CODES = {
     invalid_slot:'Select a valid SIM slot', confirmation_required:'Confirmation is required',
     storage_failed:'Could not save traffic records', traffic_unavailable:'Traffic service unavailable',
@@ -669,6 +721,34 @@ function errorText(value, language) {
 /* END SHARED PLATFORM MESSAGES */
 
 var DASH_I18N = {
+	'保存并应用': ['Save & apply', 'Kaydet ve uygula'],
+	"充电管理": ["Charging controls", "Şarj denetimi"],
+	"当前电量": ["Battery level", "Pil seviyesi"],
+	"充电状态": ["Charging status", "Şarj durumu"],
+	"正在读取…": ["Reading…", "Okunuyor…"],
+	"启用充电上限": ["Enable charge limit", "Şarj sınırını etkinleştir"],
+	"停止充电于（50–100%）": ["Stop charging at (50–100%)", "Şarjı durdur (%50–100)"],
+	"恢复充电于（20–95%）": ["Resume charging at (20–95%)", "Şarjı sürdür (%20–95)"],
+	"到达上限后暂停充电，降至下限时恢复。关闭上限会恢复正常充电。设置与屏幕共用，重启后保留。": ["Charging pauses at the upper limit and resumes at the lower limit. Disabling the limit restores normal charging. Settings are shared with the screen and persist after reboot.", "Üst sınırda şarj durur, alt sınırda sürer. Sınırı kapatmak normal şarjı geri getirir. Ayarlar ekranla ortaktır ve yeniden başlatmada korunur."],
+	"临时充满一次": ["Charge to full once", "Bir kez tam şarj et"],
+	"正在临时充满…": ["Charging to full once…", "Bir kez tam şarj ediliyor…"],
+	"临时充满后，自动恢复原来的充电上限。": ["The original charge limit resumes automatically after reaching full charge.", "Tam şarjdan sonra önceki şarj sınırı otomatik geri yüklenir."],
+	"充电阈值必须是范围内的整数": ["Charge thresholds must be whole numbers within range", "Şarj eşikleri belirtilen aralıkta tam sayı olmalıdır"],
+	"恢复充电阈值必须低于停止阈值": ["The resume threshold must be lower than the stop threshold", "Devam eşiği durdurma eşiğinden düşük olmalıdır"],
+	"插电直接启动 OpenWrt": ["Boot OpenWrt when plugged in", "Güç bağlandığında OpenWrt'yi başlat"],
+	"关机后插电，跳过充电动画并启动系统。关闭此选项保留关机充电；下次启动生效。": ["After shutdown, plug in to skip the charging screen and boot. Turn this off to keep charging mode. Takes effect on the next boot.", "Kapatıldıktan sonra güç bağlandığında şarj ekranını atlayıp başlatır. Şarj modunu korumak için kapatın. Sonraki açılışta uygulanır."],
+	"当前设备的充电控制暂不可用": ["Charging controls are currently unavailable on this device", "Bu cihazda şarj denetimi şu anda kullanılamıyor"],
+	"充电设置保存失败": ["Failed to save charging settings", "Şarj ayarları kaydedilemedi"],
+	"充电设置已保存，但服务应用失败，请重试": ["Charging settings were saved, but the service could not apply them. Please retry.", "Şarj ayarları kaydedildi ancak hizmet uygulayamadı. Yeniden deneyin."],
+	"充电设置正在应用，请稍后重试": ["Charging settings are being applied. Please try again shortly.", "Şarj ayarları uygulanıyor. Biraz sonra yeniden deneyin."],
+	"充电控制读取失败，请刷新重试": ["Failed to read charging controls. Refresh to retry.", "Şarj denetimi okunamadı. Yenileyerek tekrar deneyin."],
+	"已按上限暂停充电": ["Paused at charge limit", "Şarj sınırında duraklatıldı"],
+	"已充满": ["Fully charged", "Tam şarj oldu"],
+	"正在充电": ["Charging", "Şarj ediliyor"],
+	"使用电池": ["On battery", "Pille çalışıyor"],
+	"未充电": ["Not charging", "Şarj olmuyor"],
+	"正在应用充电设置…": ["Applying charging settings…", "Şarj ayarları uygulanıyor…"],
+	"充电设置已应用，与屏幕同步生效": ["Charging settings applied and shared with the screen", "Şarj ayarları uygulandı ve ekranla eşitlendi"],
 	'转发配置': ['Forwarding profiles', 'Yönlendirme profilleri'],
 	'启用当前配置': ['Enable this profile', 'Bu profili etkinleştir'],
 	'电源通知使用共用配置；请同时开启该配置并设置渠道。': ['Power notifications use the shared profile; enable that profile and configure its channel.', 'Güç bildirimleri ortak profili kullanır; bu profili etkinleştirip kanalını yapılandırın.'],
@@ -1346,6 +1426,125 @@ var DASH_I18N = {
 	'」': ['”', '”']
 };
 DASH_I18N['铃声与通知'] = ['Ringtones & notifications', 'Zil sesleri ve bildirimler'];
+Object.assign(DASH_I18N, {
+  "关闭后该卡无法通话、收发短信或上网，设置会在重启后保留。": [
+    "This SIM will have no calls, SMS or data. The setting persists after reboot.",
+    "Bu SIM arama, SMS veya veri kullanamaz. Ayar yeniden başlatınca korunur."
+  ],
+  "将开启所选卡的射频，设置会在重启后保留。": [
+    "Enable the selected SIM radio and keep this setting after reboot.",
+    "Seçili SIM radyosunu aç ve ayarı yeniden başlatınca koru."
+  ],
+  "SIM 射频": [
+    "SIM radios",
+    "SIM radyoları"
+  ],
+  "射频": [
+    "Radio",
+    "Radyo"
+  ],
+  "分别控制每张卡的射频并记住设置。关闭后该卡无法通话、收发短信或上网；不会自动切换到另一张卡。": [
+    "Control and remember RF for each SIM separately. When off, that SIM cannot make calls, send or receive SMS, or use data. The other SIM is not selected automatically.",
+    "Her SIM radyosunu ayrı kontrol edin ve kaydedin. Kapalı SIM arama, SMS veya veri kullanamaz. Diğer SIM otomatik seçilmez."
+  ],
+  "设置会在重启后保留。关闭当前上网卡会中断蜂窝网络。": [
+    "Saved across reboots. Turning off the data SIM disconnects cellular data.",
+    "Yeniden başlatmada korunur. Veri SIM radyosunu kapatmak hücresel bağlantıyı keser."
+  ],
+  "开启射频": [
+    "Enable radio",
+    "Radyoyu aç"
+  ],
+  "关闭射频": [
+    "Disable radio",
+    "Radyoyu kapat"
+  ],
+  "已开启": [
+    "Enabled",
+    "Açık"
+  ],
+  "已关闭": [
+    "Disabled",
+    "Kapalı"
+  ],
+  "正在应用射频设置…": [
+    "Applying radio settings…",
+    "Radyo ayarları uygulanıyor…"
+  ],
+  "射频设置已应用并保存": [
+    "Radio settings applied and saved",
+    "Radyo ayarları uygulandı ve kaydedildi"
+  ],
+  "Enable the target SIM radio before switching": [
+    "Enable the target SIM radio before switching",
+    "Geçişten önce hedef SIM radyosunu açın"
+  ],
+  "This SIM radio is disabled by the user": [
+    "This SIM radio is disabled by the user",
+    "Bu SIM radyosu kullanıcı tarafından kapatılmış"
+  ],
+  "Invalid saved SIM radio policy": [
+    "Invalid saved SIM radio policy",
+    "Kaydedilmiş SIM radyo ayarları geçersiz"
+  ],
+  "Radio setting saved; modem command failed:": [
+    "Radio setting saved; modem command failed:",
+    "Radyo ayarı kaydedildi; modem komutu başarısız:"
+  ],
+  "Radio setting saved; RF readback not confirmed": [
+    "Radio setting saved; RF readback not confirmed",
+    "Radyo ayarı kaydedildi; modem durumu doğrulanamadı"
+  ],
+  "Radio setting saved; RF enable failed": [
+    "Radio setting saved; RF enable failed",
+    "Radyo ayarı kaydedildi; radyo açılamadı"
+  ],
+  "Radio setting saved; RF disable failed": [
+    "Radio setting saved; RF disable failed",
+    "Radyo ayarı kaydedildi; radyo kapatılamadı"
+  ],
+  "请先开启目标 SIM 的射频，再切换上网卡": [
+    "Enable the target SIM radio before switching",
+    "Geçişten önce hedef SIM radyosunu açın"
+  ],
+  "该卡射频已被用户禁用": [
+    "This SIM radio is disabled by the user",
+    "Bu SIM radyosu kullanıcı tarafından kapatılmış"
+  ],
+  "已保存的 SIM 射频设置无效": [
+    "Invalid saved SIM radio policy",
+    "Kaydedilmiş SIM radyo ayarları geçersiz"
+  ],
+  "设置已保存，但基带执行失败：": [
+    "Radio setting saved; modem command failed:",
+    "Radyo ayarı kaydedildi; modem komutu başarısız:"
+  ],
+  "设置已保存，但未能确认射频状态": [
+    "Radio setting saved; RF readback not confirmed",
+    "Radyo ayarı kaydedildi; modem durumu doğrulanamadı"
+  ],
+  "设置已保存，目标 SIM 尚未就绪": [
+    "Radio setting saved; target SIM is not ready",
+    "Radyo ayarı kaydedildi; hedef SIM henüz hazır değil"
+  ],
+  "设置已保存，但射频开启失败": [
+    "Radio setting saved; RF enable failed",
+    "Radyo ayarı kaydedildi; radyo açılamadı"
+  ],
+  "设置已保存，但射频关闭失败": [
+    "Radio setting saved; RF disable failed",
+    "Radyo ayarı kaydedildi; radyo kapatılamadı"
+  ],
+  "射频设置失败": [
+    "Radio setting failed",
+    "Radyo ayarı başarısız"
+  ],
+  "射频设置请求无效": [
+    "Invalid radio request",
+    "Radyo isteği geçersiz"
+  ]
+});
+
 var DASH_KEYS = Object.keys(DASH_I18N).sort(function(a, b) { return b.length - a.length; });
 var DASH_PATTERN = new RegExp(DASH_KEYS.map(function(k) { return k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }).join('|'), 'g');
 function uiLanguage() {
